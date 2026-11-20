@@ -1,0 +1,37 @@
+# Secrets and environment files — never enter the build context.
+.env
+.env.*
+!.env.example
+
+# Installed dependencies (reinstalled inside the image with npm ci).
+node_modules
+
+# Build output (rebuilt inside the image).
+dist
+
+# Test artifacts and tooling caches.
+coverage
+*.tsbuildinfo
+
+# Version control metadata.
+.git
+.gitignore
+
+# Not needed to build the image.
+tests
+docs
+
+# Local IDE / editor files.
+.vscode
+.idea
+*.swp
+
+# Logs.
+*.log
+npm-debug.log*
+
+# Docker and OS cruft.
+compose.yaml
+Dockerfile
+.dockerignore
+.DS_Store

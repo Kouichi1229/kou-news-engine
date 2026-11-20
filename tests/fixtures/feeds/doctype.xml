@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE rss [
+  <!ENTITY payload "expanded-entity-value">
+  <!ENTITY nested "&payload;&payload;&payload;">
+]>
+<rss version="2.0">
+  <channel>
+    <title>DOCTYPE Feed</title>
+    <item>
+      <title>Entity Test</title>
+      <link>https://example.com/entity</link>
+      <description>&nested;</description>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,19 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kou-news-engine:local
+    ports:
+      - '${APP_PORT:-3000}:3000'
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      LOG_LEVEL: '${LOG_LEVEL:-info}'
+      APP_TIMEZONE: '${APP_TIMEZONE:-Asia/Taipei}'
+    restart: unless-stopped
+    init: true
+    # Larger than the app's default SHUTDOWN_TIMEOUT_MS (8000ms) so the
+    # application can finish draining before Docker force-kills the container.
+    stop_grace_period: 12s

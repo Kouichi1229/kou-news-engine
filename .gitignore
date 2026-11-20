@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+
+# Local SQLite database and its WAL sidecar files.
+data/
+*.log
+npm-debug.log*
+
+.env
+.env.*
+!.env.example
+
+.DS_Store
+.vscode/
+.idea/
+*.tsbuildinfo
