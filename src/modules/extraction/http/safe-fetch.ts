@@ -13,6 +13,7 @@ import { ExtractionFailureError, UnsafeUrlError } from '../extraction.errors.js'
 import { readBodyWithLimit } from './body-reader.js';
 import { decodeBody, isHtmlContentType, type DecodedBody } from './charset.js';
 import { createPinnedLookup, resolveAndValidate, type ResolveFunction } from './dns-pin.js';
+import type { LookupFunction } from './lookup.types.js';
 
 /** A validated URL, ready to be requested. */
 export interface ValidatedUrl {
@@ -31,13 +32,13 @@ export interface ValidatedUrl {
  * Runs the same checks for the initial URL and for every redirect target, so a
  * redirect cannot reach a destination the first hop would have been refused.
  *
+ * The port allowlist is fixed here rather than accepted as an argument: it is
+ * what stops an article URL from reaching SSH, Redis or an internal admin port,
+ * so no caller may widen it.
+ *
  * @throws UnsafeUrlError for anything that fails validation.
  */
-export function validateUrl(
-  rawUrl: string,
-  previous?: URL,
-  allowedPorts: readonly number[] = ALLOWED_PORTS,
-): ValidatedUrl {
+export function validateUrl(rawUrl: string, previous?: URL): ValidatedUrl {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -59,7 +60,7 @@ export function validateUrl(
 
   const port =
     url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : Number.parseInt(url.port, 10);
-  if (!allowedPorts.includes(port)) {
+  if (!ALLOWED_PORTS.includes(port)) {
     throw new UnsafeUrlError('BAD_PORT', `Port ${port} is not allowed`);
   }
 
@@ -88,6 +89,13 @@ export interface FetchResult {
   status: number;
 }
 
+/**
+ * Options the production fetch accepts.
+ *
+ * There is no port override and no switch that relaxes the address guard: those
+ * are module constants. A caller cannot disable SSRF protection by passing an
+ * option.
+ */
 export interface SafeFetchOptions {
   maxRedirects?: number;
   timeoutMs?: number;
@@ -96,35 +104,13 @@ export interface SafeFetchOptions {
   resolve?: ResolveFunction;
   /** Injected for deterministic tests of the request layer. */
   userAgent?: string;
-  /**
-   * Ports the request may target. Defaults to `ALLOWED_PORTS` (80/443).
-   *
-   * Exists so tests can point at an ephemeral loopback port. Production code
-   * must never pass this: the allowlist is what stops an article URL from
-   * reaching SSH, Redis or an internal admin port.
-   */
-  allowedPorts?: readonly number[];
-
-  /**
-   * Skips the private-address denial. **Tests only.**
-   *
-   * Integration tests need to reach an ephemeral loopback server to exercise
-   * the success path — charset decoding, redirect following, content-type
-   * rejection — which is otherwise unreachable because the guard denies every
-   * address a test can bind to. Production code must never set this: it is the
-   * single switch that turns SSRF protection off.
-   *
-   * The default is `false`, and a test asserts that the default denies
-   * loopback, so this cannot become an accidental production default.
-   */
-  allowPrivateAddresses?: boolean;
 }
 
 const DEFAULT_USER_AGENT = 'KouNewsEngine/0.0.0 (+https://github.com/kou-ai/kou-news-engine)';
 
 function requestOnce(
   target: ValidatedUrl,
-  lookup: ReturnType<typeof createPinnedLookup>,
+  lookup: LookupFunction,
   timeoutMs: number,
   userAgent: string,
 ): Promise<IncomingMessage> {
@@ -188,6 +174,9 @@ function statusToFailureCode(status: number): string {
  *
  * Redirects are followed here rather than by the HTTP client, because the
  * client's automatic following would skip validation entirely.
+ *
+ * The port allowlist and the address guard are module constants, not options.
+ * No caller — production or test — can relax either one through this API.
  */
 export async function safeFetch(
   rawUrl: string,
@@ -198,17 +187,11 @@ export async function safeFetch(
   const maxBytes = options.maxBytes ?? MAX_RESPONSE_BYTES;
   const userAgent = options.userAgent ?? DEFAULT_USER_AGENT;
 
-  const allowedPorts = options.allowedPorts ?? ALLOWED_PORTS;
-  const allowPrivateAddresses = options.allowPrivateAddresses ?? false;
-  let current = validateUrl(rawUrl, undefined, allowedPorts);
+  let current = validateUrl(rawUrl);
   let redirects = 0;
 
   for (;;) {
-    const target = await resolveAndValidate(
-      current.hostname,
-      options.resolve,
-      allowPrivateAddresses,
-    );
+    const target = await resolveAndValidate(current.hostname, options.resolve);
     const lookup = createPinnedLookup(target.pinned);
     const response = await requestOnce(current, lookup, timeoutMs, userAgent);
     const status = response.statusCode ?? 0;
@@ -229,7 +212,7 @@ export async function safeFetch(
       } catch {
         throw new UnsafeUrlError('INVALID_REDIRECT', 'Redirect Location could not be parsed');
       }
-      current = validateUrl(next.toString(), current.url, allowedPorts);
+      current = validateUrl(next.toString(), current.url);
       continue;
     }
 

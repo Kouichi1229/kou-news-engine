@@ -31,34 +31,10 @@ export class UnsafeUrlError extends ExtractionFailureError {
   }
 }
 
-/**
- * The lease token no longer matches, so this worker lost the claim.
- *
- * Never retried and never treated as success: another worker owns the row and
- * may already have written a real result.
- */
-export class LostClaimError extends Error {
-  readonly articleId: string;
-
-  constructor(articleId: string) {
-    super(`Lost the claim on article ${articleId}; another worker owns it`);
-    this.name = 'LostClaimError';
-    this.articleId = articleId;
-  }
-}
-
 /** The response body exceeded `MAX_RESPONSE_BYTES`. */
 export class ResponseTooLargeError extends ExtractionFailureError {
   constructor(maxBytes: number) {
     super('RESPONSE_TOO_LARGE', `Response exceeded the ${maxBytes} byte limit`);
     this.name = 'ResponseTooLargeError';
-  }
-}
-
-/** The request exceeded `REQUEST_TIMEOUT_MS`. */
-export class RequestTimeoutError extends ExtractionFailureError {
-  constructor(timeoutMs: number) {
-    super('TIMEOUT', `Request exceeded the ${timeoutMs} ms timeout`);
-    this.name = 'RequestTimeoutError';
   }
 }

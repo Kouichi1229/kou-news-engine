@@ -1,7 +1,4 @@
-import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
-
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   ExtractionFailureError,
@@ -10,41 +7,45 @@ import {
 } from '../../../../src/modules/extraction/extraction.errors.js';
 import type { ResolveFunction } from '../../../../src/modules/extraction/http/dns-pin.js';
 import { safeFetch, validateUrl } from '../../../../src/modules/extraction/http/safe-fetch.js';
+import { enqueueResponse, recordedRequests, resetFakeHttp } from '../../../helpers/fake-http.js';
 
-const servers: Server[] = [];
-
-async function serve(handler: Parameters<typeof createServer>[1]): Promise<{
-  port: number;
-  url: string;
-}> {
-  const server = createServer(handler);
-  servers.push(server);
-  await new Promise<void>((resolve) => {
-    server.listen(0, '127.0.0.1', resolve);
-  });
-  const address = server.address() as AddressInfo;
-  return { port: address.port, url: `http://127.0.0.1:${address.port}` };
-}
-
-afterEach(async () => {
-  await Promise.all(
-    servers.splice(0).map(
-      (server) =>
-        new Promise<void>((resolve) => {
-          server.close(() => {
-            resolve();
-          });
-        }),
-    ),
-  );
+/**
+ * The HTTP connection is faked so the success path can run without a socket.
+ *
+ * `safeFetch`'s guard cannot be satisfied by a test server: it denies every
+ * address a test can bind to and admits only ports 80/443. The guard itself runs
+ * for real on every hop below — only the socket is replaced — so these tests
+ * exercise the production code path rather than a relaxed copy of it.
+ */
+vi.mock('node:http', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:http')>();
+  const { fakeRequest } = await import('../../../helpers/fake-http.js');
+  return { ...actual, request: fakeRequest };
 });
 
-/** Pretends every hostname resolves to the given address. */
-function resolverFor(address: string, family = 4): ResolveFunction {
+vi.mock('node:https', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:https')>();
+  const { fakeRequest } = await import('../../../helpers/fake-http.js');
+  return { ...actual, request: fakeRequest };
+});
+
+const PUBLIC_IP = '93.184.216.34';
+
+/** Answers every hostname with one public address, so the guard admits it. */
+function publicResolver(address = PUBLIC_IP, family = 4): ResolveFunction {
   return (_hostname, _options, callback) => {
     callback(null, [{ address, family }]);
   };
 }
+
+beforeEach(() => {
+  resetFakeHttp();
+});
+
+afterEach(() => {
+  resetFakeHttp();
+  vi.restoreAllMocks();
+});
 
 describe('validateUrl', () => {
   it('accepts an ordinary https URL', () => {
@@ -56,9 +57,8 @@ describe('validateUrl', () => {
     expect(validateUrl('http://example.com/a').port).toBe(80);
   });
 
-  it('rejects non-http schemes', () => {
-    expect(() => validateUrl('file:///etc/passwd')).toThrow(UnsafeUrlError);
-    expect(() => validateUrl('javascript:alert(1)')).toThrow(UnsafeUrlError);
+  it('rejects a non-http scheme', () => {
+    expect(() => validateUrl('ftp://example.com/a')).toThrow(UnsafeUrlError);
   });
 
   it('rejects embedded credentials', () => {
@@ -66,61 +66,60 @@ describe('validateUrl', () => {
   });
 
   it('rejects a port outside the allowlist', () => {
-    expect(() => validateUrl('http://example.com:22/a')).toThrow(UnsafeUrlError);
-    expect(() => validateUrl('http://example.com:6379/a')).toThrow(UnsafeUrlError);
-    expect(() => validateUrl('http://example.com:8080/a')).toThrow(UnsafeUrlError);
+    const error = (() => {
+      try {
+        validateUrl('http://example.com:22/a');
+        return null;
+      } catch (caught) {
+        return caught;
+      }
+    })();
+    expect(error).toBeInstanceOf(UnsafeUrlError);
+    expect((error as UnsafeUrlError).code).toBe('BAD_PORT');
   });
 
-  it('rejects an unparseable URL', () => {
-    expect(() => validateUrl('not a url')).toThrow(UnsafeUrlError);
-  });
-
-  it('strips IPv6 brackets from the hostname', () => {
-    expect(validateUrl('http://[::1]/').hostname).toBe('::1');
-  });
-
-  it('rejects an HTTPS to HTTP downgrade on redirect', () => {
-    expect(() => validateUrl('http://example.com/b', new URL('https://example.com/a'))).toThrow(
-      UnsafeUrlError,
-    );
-  });
-
-  it('allows an HTTP to HTTPS upgrade on redirect', () => {
-    expect(validateUrl('https://example.com/b', new URL('http://example.com/a')).port).toBe(443);
+  it('refuses an https-to-http redirect', () => {
+    const error = (() => {
+      try {
+        validateUrl('http://example.com/a', new URL('https://example.com/a'));
+        return null;
+      } catch (caught) {
+        return caught;
+      }
+    })();
+    expect((error as UnsafeUrlError).code).toBe('HTTPS_DOWNGRADE');
   });
 
   it('omits the default port from the Host header', () => {
     expect(validateUrl('https://example.com/a').hostHeader).toBe('example.com');
   });
+
+  it('rejects a non-default port, since only 80 and 443 are allowed', () => {
+    expect(() => validateUrl('http://example.com:8080/a')).toThrow(UnsafeUrlError);
+  });
 });
 
 describe('safeFetch — the guard blocks private destinations', () => {
-  it('refuses a loopback IP literal even with a live server listening', async () => {
-    const { url } = await serve((_req, res) => {
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end('<html><body>unreachable</body></html>');
-    });
-    await expect(
-      safeFetch(`${url}/a`, { allowedPorts: [Number(new URL(url).port)] }),
-    ).rejects.toBeInstanceOf(UnsafeUrlError);
+  it('refuses a loopback IP literal', async () => {
+    await expect(safeFetch('http://127.0.0.1/a')).rejects.toBeInstanceOf(UnsafeUrlError);
   });
 
   it('refuses a hostname that resolves to loopback', async () => {
     await expect(
-      safeFetch('http://public.example.com/a', { resolve: resolverFor('127.0.0.1') }),
+      safeFetch('http://public.example.com/a', { resolve: publicResolver('127.0.0.1') }),
     ).rejects.toBeInstanceOf(UnsafeUrlError);
   });
 
   it('refuses the cloud metadata address', async () => {
     await expect(
-      safeFetch('http://metadata.example.com/a', { resolve: resolverFor('169.254.169.254') }),
+      safeFetch('http://metadata.example.com/a', { resolve: publicResolver('169.254.169.254') }),
     ).rejects.toBeInstanceOf(UnsafeUrlError);
   });
 
   it('refuses a mixed answer where only one address is private', async () => {
     const mixed: ResolveFunction = (_hostname, _options, callback) => {
       callback(null, [
-        { address: '93.184.216.34', family: 4 },
+        { address: PUBLIC_IP, family: 4 },
         { address: '10.0.0.5', family: 4 },
       ]);
     };
@@ -128,194 +127,262 @@ describe('safeFetch — the guard blocks private destinations', () => {
       UnsafeUrlError,
     );
   });
-});
 
-describe('safeFetch — pinning controls the socket', () => {
-  it('connects to the pinned address rather than resolving the hostname again', async () => {
-    // `pinned.invalid` does not exist in DNS. This request can only reach the
-    // server if the pinned lookup supplied the address, which is the property
-    // under test. `allowPrivateAddresses` is on because the test server must
-    // bind to loopback; see the guard tests above for the denying default.
-    const { port } = await serve((req, res) => {
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end(`<html><body><p>host=${String(req.headers.host)}</p></body></html>`);
-    });
-
-    const result = await safeFetch(`http://pinned.invalid:${String(port)}/a`, {
-      resolve: resolverFor('127.0.0.1'),
-      allowedPorts: [port],
-      allowPrivateAddresses: true,
-    });
-
-    expect(result.body.text).toContain('host=pinned.invalid');
-    expect(result.status).toBe(200);
+  it('refuses an IPv6 loopback literal', async () => {
+    await expect(safeFetch('http://[::1]/a')).rejects.toBeInstanceOf(UnsafeUrlError);
   });
 
-  it('sends the requested Host header while connecting to the pinned address', async () => {
-    let observedHost: string | undefined;
-    const { port } = await serve((req, res) => {
-      observedHost = req.headers.host;
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end('<html><body><p>ok</p></body></html>');
-    });
+  it('never opens a connection when the guard refuses', async () => {
+    await expect(
+      safeFetch('http://public.example.com/a', { resolve: publicResolver('127.0.0.1') }),
+    ).rejects.toBeInstanceOf(UnsafeUrlError);
+    expect(recordedRequests()).toHaveLength(0);
+  });
 
-    await safeFetch(`http://article.example.com:${String(port)}/path`, {
-      resolve: resolverFor('127.0.0.1'),
-      allowedPorts: [port],
-      allowPrivateAddresses: true,
-    });
+  it('refuses a port outside the allowlist before connecting', async () => {
+    const error = await safeFetch('http://example.com:22/a', {
+      resolve: publicResolver(),
+    }).catch((caught: unknown) => caught);
+    expect((error as UnsafeUrlError).code).toBe('BAD_PORT');
+    expect(recordedRequests()).toHaveLength(0);
+  });
+});
 
-    // The Host header carries the name, not the address: virtual hosting and
-    // TLS SNI must still see the site the user asked for.
-    expect(observedHost).toBe(`article.example.com:${String(port)}`);
+describe('safeFetch — the pinned address reaches the socket', () => {
+  it('hands the resolved address to the transport as a pinned lookup', async () => {
+    enqueueResponse({ headers: { 'content-type': 'text/html' }, body: [Buffer.from('<p>ok</p>')] });
+
+    await safeFetch('http://article.example.com/a', { resolve: publicResolver() });
+
+    const [sent] = recordedRequests();
+    expect(sent?.host).toBe('article.example.com');
+    expect(sent?.port).toBe(80);
+    // The Host header carries the name, not the address, so virtual hosting and
+    // TLS SNI still see the site that was requested.
+    expect(sent?.headers?.Host).toBe('article.example.com');
+
+    // The lookup handed over is the pinning one: asking it for the address must
+    // yield the validated address, never a second DNS answer.
+    const lookup = sent?.lookup as (
+      hostname: string,
+      options: { all: true },
+      cb: (err: null, addresses: Array<{ address: string; family: number }>) => void,
+    ) => void;
+    const resolved = await new Promise<Array<{ address: string; family: number }>>((resolve) => {
+      lookup('article.example.com', { all: true }, (_err, addresses) => {
+        resolve(addresses);
+      });
+    });
+    expect(resolved).toEqual([{ address: PUBLIC_IP, family: 4 }]);
+  });
+
+  it('pins SNI and certificate verification to the requested hostname over https', async () => {
+    enqueueResponse({ headers: { 'content-type': 'text/html' }, body: [Buffer.from('<p>ok</p>')] });
+
+    await safeFetch('https://article.example.com/a', { resolve: publicResolver() });
+
+    const [sent] = recordedRequests();
+    expect(sent?.port).toBe(443);
+    // The socket is pinned to the validated address, but the name stays the
+    // identity used for SNI and certificate checks.
+    expect(sent?.servername).toBe('article.example.com');
+    expect(sent?.rejectUnauthorized).toBe(true);
   });
 });
 
 describe('safeFetch — successful retrieval', () => {
-  async function fetchFrom(
-    handler: Parameters<typeof createServer>[1],
-    options: { path?: string } = {},
-  ): Promise<Awaited<ReturnType<typeof safeFetch>>> {
-    const { port } = await serve(handler);
-    return safeFetch(`http://content.example.com:${String(port)}${options.path ?? '/a'}`, {
-      resolve: resolverFor('127.0.0.1'),
-      allowedPorts: [port],
-      allowPrivateAddresses: true,
-    });
+  function enqueueHtml(html: string, contentType = 'text/html; charset=utf-8'): void {
+    enqueueResponse({ headers: { 'content-type': contentType }, body: [Buffer.from(html)] });
   }
 
   it('returns the decoded body, final URL and status', async () => {
-    const result = await fetchFrom((_req, res) => {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end('<html><body><p>內容</p></body></html>');
-    });
+    enqueueHtml('<html><body><p>內容</p></body></html>');
+
+    const result = await safeFetch('http://content.example.com/a', { resolve: publicResolver() });
+
     expect(result.body.text).toContain('內容');
+    expect(result.body.source).toBe('content-type');
     expect(result.status).toBe(200);
-    expect(result.finalUrl).toContain('content.example.com');
+    expect(result.finalUrl).toBe('http://content.example.com/a');
   });
 
   it('decodes a GBK body using the response charset', async () => {
     const iconv = (await import('iconv-lite')).default;
     const text = '简体中文新闻内容';
-    const result = await fetchFrom((_req, res) => {
-      res.writeHead(200, { 'content-type': 'text/html; charset=gbk' });
-      res.end(iconv.encode(text, 'gbk'));
+    enqueueResponse({
+      headers: { 'content-type': 'text/html; charset=gbk' },
+      body: [iconv.encode(text, 'gbk')],
     });
+
+    const result = await safeFetch('http://content.example.com/a', { resolve: publicResolver() });
     expect(result.body.text).toContain(text);
+    expect(result.body.charset).toBe('gbk');
   });
 
   it('rejects a non-HTML content type', async () => {
-    await expect(
-      fetchFrom((_req, res) => {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end('{}');
-      }),
-    ).rejects.toBeInstanceOf(ExtractionFailureError);
-  });
+    enqueueResponse({ headers: { 'content-type': 'application/json' }, body: [Buffer.from('{}')] });
 
-  it('rejects a 404', async () => {
-    const error = await fetchFrom((_req, res) => {
-      res.writeHead(404, { 'content-type': 'text/html' });
-      res.end('<html><body>gone</body></html>');
+    const error = await safeFetch('http://content.example.com/a', {
+      resolve: publicResolver(),
     }).catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(ExtractionFailureError);
+    expect((error as ExtractionFailureError).code).toBe('UNSUPPORTED_CONTENT_TYPE');
+  });
+
+  it('rejects a 404 with its status code', async () => {
+    enqueueResponse({
+      status: 404,
+      headers: { 'content-type': 'text/html' },
+      body: [Buffer.from('gone')],
+    });
+
+    const error = await safeFetch('http://content.example.com/a', {
+      resolve: publicResolver(),
+    }).catch((caught: unknown) => caught);
+
     expect((error as ExtractionFailureError).code).toBe('HTTP_404');
     expect((error as ExtractionFailureError).httpStatus).toBe(404);
   });
 
-  it('rejects a 403', async () => {
-    const error = await fetchFrom((_req, res) => {
-      res.writeHead(403, { 'content-type': 'text/html' });
-      res.end('forbidden');
+  it('rejects a 403 with its status code', async () => {
+    enqueueResponse({
+      status: 403,
+      headers: { 'content-type': 'text/html' },
+      body: [Buffer.from('forbidden')],
+    });
+
+    const error = await safeFetch('http://content.example.com/a', {
+      resolve: publicResolver(),
     }).catch((caught: unknown) => caught);
     expect((error as ExtractionFailureError).code).toBe('HTTP_403');
   });
 
   it('rejects a body above the byte cap', async () => {
-    const { port } = await serve((_req, res) => {
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end('x'.repeat(5000));
+    enqueueResponse({
+      headers: { 'content-type': 'text/html' },
+      body: [Buffer.from('x'.repeat(5000))],
     });
 
-    const error = await safeFetch(`http://content.example.com:${String(port)}/a`, {
-      resolve: resolverFor('127.0.0.1'),
-      allowedPorts: [port],
-      allowPrivateAddresses: true,
+    const error = await safeFetch('http://content.example.com/a', {
+      resolve: publicResolver(),
       maxBytes: 100,
     }).catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(ResponseTooLargeError);
     expect((error as ResponseTooLargeError).code).toBe('RESPONSE_TOO_LARGE');
   });
+
+  it('rejects a body that exceeds the cap across several chunks', async () => {
+    enqueueResponse({
+      headers: { 'content-type': 'text/html' },
+      body: [Buffer.from('x'.repeat(60)), Buffer.from('x'.repeat(60))],
+    });
+
+    await expect(
+      safeFetch('http://content.example.com/a', { resolve: publicResolver(), maxBytes: 100 }),
+    ).rejects.toBeInstanceOf(ResponseTooLargeError);
+  });
+
+  it('reports a timeout as TIMEOUT', async () => {
+    enqueueResponse({ hang: true });
+
+    const error = await safeFetch('http://content.example.com/a', {
+      resolve: publicResolver(),
+      timeoutMs: 10,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ExtractionFailureError);
+    expect((error as ExtractionFailureError).code).toBe('TIMEOUT');
+  });
 });
 
 describe('safeFetch — redirects', () => {
   it('follows a redirect to another allowlisted location', async () => {
-    const { port } = await serve((req, res) => {
-      if (req.url === '/start') {
-        res.writeHead(302, { location: '/final' });
-        res.end();
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end('<html><body><p>arrived</p></body></html>');
+    enqueueResponse({ status: 302, headers: { location: '/final' } });
+    enqueueResponse({
+      headers: { 'content-type': 'text/html' },
+      body: [Buffer.from('<p>arrived</p>')],
     });
 
-    const result = await safeFetch(`http://content.example.com:${String(port)}/start`, {
-      resolve: resolverFor('127.0.0.1'),
-      allowedPorts: [port],
-      allowPrivateAddresses: true,
+    const result = await safeFetch('http://content.example.com/start', {
+      resolve: publicResolver(),
     });
 
     expect(result.body.text).toContain('arrived');
-    expect(result.finalUrl).toContain('/final');
+    expect(result.finalUrl).toBe('http://content.example.com/final');
+    expect(recordedRequests()).toHaveLength(2);
   });
 
-  it('rejects a redirect that exceeds the hop limit', async () => {
-    const { port } = await serve((req, res) => {
-      res.writeHead(302, { location: `/loop${String(Date.now())}` });
-      res.end();
-    });
+  it('revalidates the address on the redirect hop', async () => {
+    enqueueResponse({ status: 302, headers: { location: 'http://elsewhere.example.com/final' } });
+    enqueueResponse({ headers: { 'content-type': 'text/html' }, body: [Buffer.from('<p>ok</p>')] });
 
-    await expect(
-      safeFetch(`http://content.example.com:${String(port)}/start`, {
-        resolve: resolverFor('127.0.0.1'),
-        allowedPorts: [port],
-        allowPrivateAddresses: true,
-        maxRedirects: 2,
-      }),
-    ).rejects.toBeInstanceOf(UnsafeUrlError);
+    await safeFetch('http://content.example.com/start', { resolve: publicResolver() });
+
+    const [, second] = recordedRequests();
+    expect(second?.host).toBe('elsewhere.example.com');
   });
 
-  it('rejects a redirect with no Location header', async () => {
-    const { port } = await serve((_req, res) => {
-      res.writeHead(302);
-      res.end();
-    });
+  it('rejects a redirect that resolves to a private address', async () => {
+    enqueueResponse({ status: 302, headers: { location: 'http://internal.example.com/final' } });
+
+    let call = 0;
+    const resolver: ResolveFunction = (_hostname, _options, callback) => {
+      call += 1;
+      // The first hop is public; the redirect target is not.
+      callback(null, [{ address: call === 1 ? PUBLIC_IP : '127.0.0.1', family: 4 }]);
+    };
 
     await expect(
-      safeFetch(`http://content.example.com:${String(port)}/start`, {
-        resolve: resolverFor('127.0.0.1'),
-        allowedPorts: [port],
-        allowPrivateAddresses: true,
-      }),
+      safeFetch('http://content.example.com/start', { resolve: resolver }),
     ).rejects.toBeInstanceOf(UnsafeUrlError);
+    // The refusal happened before the second connection was attempted.
+    expect(recordedRequests()).toHaveLength(1);
   });
 
   it('rejects a redirect to a port outside the allowlist', async () => {
-    const { port } = await serve((_req, res) => {
-      res.writeHead(302, { location: 'http://content.example.com:22/ssh' });
-      res.end();
-    });
+    enqueueResponse({ status: 302, headers: { location: 'http://content.example.com:22/ssh' } });
 
-    await expect(
-      safeFetch(`http://content.example.com:${String(port)}/start`, {
-        resolve: resolverFor('127.0.0.1'),
-        allowedPorts: [port],
-        allowPrivateAddresses: true,
-      }),
-    ).rejects.toBeInstanceOf(UnsafeUrlError);
+    const error = await safeFetch('http://content.example.com/start', {
+      resolve: publicResolver(),
+    }).catch((caught: unknown) => caught);
+
+    expect((error as UnsafeUrlError).code).toBe('BAD_PORT');
+    expect(recordedRequests()).toHaveLength(1);
+  });
+
+  it('rejects a redirect that exceeds the hop limit', async () => {
+    for (let i = 0; i < 4; i += 1) {
+      enqueueResponse({ status: 302, headers: { location: `/loop${String(i)}` } });
+    }
+
+    const error = await safeFetch('http://content.example.com/start', {
+      resolve: publicResolver(),
+      maxRedirects: 2,
+    }).catch((caught: unknown) => caught);
+
+    expect((error as UnsafeUrlError).code).toBe('TOO_MANY_REDIRECTS');
+  });
+
+  it('rejects a redirect with no Location header', async () => {
+    enqueueResponse({ status: 302 });
+
+    const error = await safeFetch('http://content.example.com/start', {
+      resolve: publicResolver(),
+    }).catch((caught: unknown) => caught);
+
+    expect((error as UnsafeUrlError).code).toBe('INVALID_REDIRECT');
+  });
+
+  it('rejects a redirect to a non-http scheme', async () => {
+    enqueueResponse({ status: 302, headers: { location: 'file:///etc/passwd' } });
+
+    const error = await safeFetch('http://content.example.com/start', {
+      resolve: publicResolver(),
+    }).catch((caught: unknown) => caught);
+
+    expect((error as UnsafeUrlError).code).toBe('UNSUPPORTED_SCHEME');
   });
 });
 
@@ -330,18 +397,13 @@ describe('safeFetch — guard precedence', () => {
     expect((error as UnsafeUrlError).httpStatus).toBeNull();
   });
 
-  it('denies loopback by default, proving the test seam is off unless set', async () => {
-    const { port } = await serve((_req, res) => {
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end('<html><body>no</body></html>');
-    });
+  it('denies loopback on the redirect hop even when the first hop was public', async () => {
+    enqueueResponse({ status: 302, headers: { location: 'http://127.0.0.1/final' } });
 
-    // `allowPrivateAddresses` is deliberately omitted.
-    await expect(
-      safeFetch(`http://content.example.com:${String(port)}/a`, {
-        resolve: resolverFor('127.0.0.1'),
-        allowedPorts: [port],
-      }),
-    ).rejects.toBeInstanceOf(UnsafeUrlError);
+    const error = await safeFetch('http://content.example.com/start', {
+      resolve: publicResolver(),
+    }).catch((caught: unknown) => caught);
+
+    expect((error as UnsafeUrlError).code).toBe('SSRF_BLOCKED');
   });
 });

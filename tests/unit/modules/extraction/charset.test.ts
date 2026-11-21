@@ -7,6 +7,7 @@ import {
   charsetFromMeta,
   decodeBody,
   isHtmlContentType,
+  looksMisDecoded,
 } from '../../../../src/modules/extraction/http/charset.js';
 
 describe('charsetFromContentType', () => {
@@ -101,6 +102,124 @@ describe('decodeBody — priority order', () => {
     const decoded = decodeBody(html, 'text/html');
     expect(decoded.source).toBe('bom');
   });
+
+  it('prefers a BOM over the HTTP header', () => {
+    const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+    const decoded = decodeBody(
+      Buffer.concat([bom, Buffer.from('<p>hi</p>')]),
+      'text/html; charset=gbk',
+    );
+    expect(decoded.source).toBe('bom');
+    expect(decoded.charset).toBe('utf-8');
+  });
+
+  it('decodes a UTF-16LE body as UTF-16LE when the header wrongly says UTF-8', () => {
+    const text = '繁體中文新聞內容測試';
+    const bytes = Buffer.concat([Buffer.from([0xff, 0xfe]), iconv.encode(text, 'utf-16le')]);
+
+    const decoded = decodeBody(bytes, 'text/html; charset=utf-8');
+
+    expect(decoded.source).toBe('bom');
+    expect(decoded.charset).toBe('utf-16le');
+    expect(decoded.text).toBe(text);
+    expect(decoded.text).not.toContain('\uFFFD');
+  });
+
+  it('decodes a UTF-16BE body as UTF-16BE when the header wrongly says UTF-8', () => {
+    const text = '繁體中文新聞內容測試';
+    const bytes = Buffer.concat([Buffer.from([0xfe, 0xff]), iconv.encode(text, 'utf-16be')]);
+
+    const decoded = decodeBody(bytes, 'text/html; charset=utf-8');
+
+    expect(decoded.source).toBe('bom');
+    expect(decoded.charset).toBe('utf-16be');
+    expect(decoded.text).toBe(text);
+    expect(decoded.text).not.toContain('\uFFFD');
+  });
+
+  it('prefers a UTF-16 BOM over a conflicting meta charset', () => {
+    const text = '<p>繁體中文</p>';
+    const bytes = Buffer.concat([Buffer.from([0xff, 0xfe]), iconv.encode(text, 'utf-16le')]);
+
+    const decoded = decodeBody(bytes, 'text/html');
+
+    expect(decoded.source).toBe('bom');
+    expect(decoded.charset).toBe('utf-16le');
+  });
+
+  it('keeps the header ahead of meta when there is no BOM', () => {
+    const html = '<html><head><meta charset="big5"></head><body>hi</body></html>';
+    const decoded = decodeBody(Buffer.from(html), 'text/html; charset=gbk');
+    expect(decoded.source).toBe('content-type');
+    expect(decoded.charset).toBe('gbk');
+  });
+
+  it('falls through an unsupported header charset to meta', () => {
+    const html = '<html><head><meta charset="utf-8"></head><body>hi</body></html>';
+    const decoded = decodeBody(Buffer.from(html), 'text/html; charset=made-up-encoding');
+    expect(decoded.source).toBe('meta');
+    expect(decoded.charset).toBe('utf-8');
+  });
+
+  it('falls through an unsupported header charset and no meta to UTF-8', () => {
+    const decoded = decodeBody(Buffer.from('<p>hi</p>'), 'text/html; charset=made-up-encoding');
+    expect(decoded.source).toBe('fallback');
+    expect(decoded.charset).toBe('utf-8');
+  });
+});
+
+describe('decodeBody — the BOM does not leak into the text', () => {
+  it('drops a UTF-8 BOM', () => {
+    const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('新聞', 'utf8')]);
+    const decoded = decodeBody(bytes, 'text/html');
+    expect(decoded.text).toBe('新聞');
+    expect(decoded.text.startsWith('\uFEFF')).toBe(false);
+  });
+
+  it('drops a UTF-16LE BOM', () => {
+    const bytes = Buffer.concat([Buffer.from([0xff, 0xfe]), iconv.encode('新聞', 'utf-16le')]);
+    const decoded = decodeBody(bytes, 'text/html');
+    expect(decoded.text).toBe('新聞');
+    expect(decoded.text.startsWith('\uFEFF')).toBe(false);
+  });
+
+  it('drops a UTF-16BE BOM', () => {
+    const bytes = Buffer.concat([Buffer.from([0xfe, 0xff]), iconv.encode('新聞', 'utf-16be')]);
+    const decoded = decodeBody(bytes, 'text/html');
+    expect(decoded.text).toBe('新聞');
+    expect(decoded.text.startsWith('\uFEFF')).toBe(false);
+  });
+
+  it('leaves a U+FEFF inside the body alone, since it may be real content', () => {
+    const text = '前\uFEFF後';
+    const decoded = decodeBody(Buffer.from(text, 'utf8'), 'text/html; charset=utf-8');
+    expect(decoded.text).toBe(text);
+  });
+});
+
+describe('looksMisDecoded', () => {
+  it('flags a body decoded under the wrong encoding', () => {
+    const bytes = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      iconv.encode('繁體中文新聞', 'utf-16le'),
+    ]);
+    // What the old header-first order would have produced.
+    const asUtf8 = iconv.decode(bytes, 'utf-8');
+    expect(looksMisDecoded(asUtf8)).toBe(true);
+  });
+
+  it('does not flag a correct decode', () => {
+    expect(looksMisDecoded('繁體中文新聞內容，一切正常。')).toBe(false);
+  });
+
+  it('tolerates a single corrupt byte in a long body', () => {
+    const text = `${'正常內容'.repeat(100)}\uFFFD${'正常內容'.repeat(100)}`;
+    expect(looksMisDecoded(text)).toBe(false);
+  });
+
+  it('does not flag an empty string', () => {
+    expect(looksMisDecoded('')).toBe(false);
+  });
 });
 
 describe('decodeBody — actual decoding', () => {
@@ -132,10 +251,11 @@ describe('decodeBody — actual decoding', () => {
   });
 
   it('replaces undecodable bytes with U+FFFD instead of throwing', () => {
-    const bytes = Buffer.from([0xff, 0xfe, 0xfd]);
+    // `0xff 0xfe` would now be read as a UTF-16LE BOM, so the fixture starts
+    // with a byte that is invalid in UTF-8 without forming a BOM.
+    const bytes = Buffer.from([0x41, 0xff, 0x41]);
     const decoded = decodeBody(bytes, 'text/html; charset=utf-8');
-    expect(decoded.text.length).toBeGreaterThan(0);
-    expect(() => decoded.text).not.toThrow();
+    expect(decoded.text).toContain('\uFFFD');
   });
 });
 

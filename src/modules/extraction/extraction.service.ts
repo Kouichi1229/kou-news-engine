@@ -13,6 +13,7 @@ import {
 import { ExtractionFailureError } from './extraction.errors.js';
 import type { ExtractionRunSummary, ExtractionSuccess } from './extraction.types.js';
 import { safeFetch } from './http/safe-fetch.js';
+import { looksMisDecoded } from './http/charset.js';
 import type { ResolveFunction } from './http/dns-pin.js';
 import { extractArticleBody, meetsMinimumLength } from './parse/html-extractor.js';
 import { codePointLength, normaliseText } from './parse/text-normaliser.js';
@@ -204,6 +205,19 @@ export class ExtractionService {
       page = await this.fetch(url);
     } catch (error) {
       return this.recordFailure(articleId, token, error);
+    }
+
+    // A body decoded under the wrong encoding is corrupt throughout, not merely
+    // noisy, so it is recorded as a failure instead of being stored as article
+    // text. The parser would otherwise find enough characters to pass the
+    // minimum-length gate and the damage would only surface downstream.
+    if (looksMisDecoded(page.html)) {
+      const recorded = await this.options.repository.markFailed({
+        articleId,
+        token,
+        failure: { code: 'DECODE_FAILED', httpStatus: page.status },
+      });
+      return recorded ? 'failed' : 'lost';
     }
 
     const parsed = extractArticleBody(page.html, page.finalUrl);

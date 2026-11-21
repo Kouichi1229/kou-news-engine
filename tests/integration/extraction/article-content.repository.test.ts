@@ -23,10 +23,24 @@ function insertArticle(id: string, order: number): void {
   });
 }
 
+/**
+ * Deterministic token source.
+ *
+ * A claim's token is unique per row, which the schema's partial unique index
+ * enforces. A counter gives that uniqueness while keeping a failure
+ * reproducible; a random token would make a collision dependent on luck.
+ */
+let tokenSequence = 0;
+
+function nextToken(): string {
+  tokenSequence += 1;
+  return `token-${String(tokenSequence)}`;
+}
+
 function claim(overrides: Partial<Parameters<SqliteArticleContentRepository['claim']>[0]> = {}) {
   return repository.claim({
     owner: 'worker-1',
-    token: `token-${String(Math.random()).slice(2)}`,
+    token: nextToken(),
     now: 1_000,
     leaseDurationMs: 180_000,
     extractorVersion: EXTRACTOR_VERSION,
@@ -207,6 +221,37 @@ describe('claim', () => {
     });
     const reclaimed = await claim({ token: 'tok2', now: 9_999_999, extractorVersion: 'v2' });
     expect(reclaimed?.articleId).toBe('a1');
+  });
+
+  it('never re-claims a DECODE_FAILED row at the same version', async () => {
+    insertArticle('a1', 1);
+    await claim({ token: 'tok1' });
+    await repository.markFailed({
+      articleId: 'a1',
+      token: 'tok1',
+      failure: { code: 'DECODE_FAILED', httpStatus: 200 },
+    });
+    expect(await claim({ token: 'tok2', now: 9_999_999 })).toBeNull();
+  });
+
+  it('re-queues a DECODE_FAILED row after a version bump, resetting attempts', async () => {
+    insertArticle('a1', 1);
+    const first = await claim({ token: 'tok1' });
+    await repository.markFailed({
+      articleId: 'a1',
+      token: 'tok1',
+      failure: { code: 'DECODE_FAILED', httpStatus: 200 },
+    });
+
+    const reclaimed = await claim({ token: 'tok2', now: 9_999_999, extractorVersion: 'v2' });
+
+    expect(reclaimed?.articleId).toBe('a1');
+    // A new version starts its own attempt budget rather than inheriting the
+    // previous one's count.
+    expect(reclaimed?.attempts).toBe(1);
+    // The fencing rule holds: a new claim must carry a token no earlier lease had.
+    expect(reclaimed?.leaseToken).toBe('tok2');
+    expect(reclaimed?.leaseToken).not.toBe(first?.leaseToken);
   });
 });
 

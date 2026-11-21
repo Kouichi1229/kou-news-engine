@@ -64,7 +64,6 @@ export interface PinnedTarget {
 export async function resolveAndValidate(
   rawHostname: string,
   resolve: ResolveFunction = defaultResolve,
-  allowPrivateAddresses = false,
 ): Promise<PinnedTarget> {
   const hostname = stripZoneId(stripIpv6Brackets(rawHostname.trim()));
 
@@ -74,7 +73,7 @@ export async function resolveAndValidate(
 
   if (isIpLiteral(hostname)) {
     const verdict = classifyAll([hostname]);
-    if (!verdict.safe && !allowPrivateAddresses) {
+    if (!verdict.safe) {
       throw new UnsafeUrlError(
         'SSRF_BLOCKED',
         `Refusing to connect to ${hostname}: ${verdict.reason ?? 'unsafe'}`,
@@ -97,7 +96,7 @@ export async function resolveAndValidate(
   });
 
   const verdict = classifyAll(addresses.map((entry) => entry.address));
-  if (!verdict.safe && !allowPrivateAddresses) {
+  if (!verdict.safe) {
     throw new UnsafeUrlError(
       'SSRF_BLOCKED',
       `Refusing to connect to ${hostname}: ${verdict.reason ?? 'unsafe'}`,

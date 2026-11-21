@@ -106,4 +106,5 @@ export const PERMANENT_FAILURE_CODES: readonly string[] = [
   'UNSUPPORTED_CONTENT_TYPE',
   'INVALID_URL',
   'INVALID_REDIRECT',
+  'DECODE_FAILED',
 ];

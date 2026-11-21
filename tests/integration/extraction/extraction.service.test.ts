@@ -205,6 +205,59 @@ describe('ExtractionService — failures', () => {
     expect(row?.attempts).toBe(1);
   });
 
+  it('records DECODE_FAILED rather than storing mojibake as article text', async () => {
+    insertArticle('a1', 1);
+    // What a body decoded under the wrong encoding looks like: replacement
+    // characters throughout, including inside the paragraph the parser would
+    // otherwise accept.
+    const mojibake = `<html><body><p>${'\uFFFD'.repeat(400)}</p></body></html>`;
+
+    await service({
+      fetchPage: async () => ({ html: mojibake, finalUrl: 'https://example.com/x', status: 200 }),
+    }).run();
+
+    const row = await repository.findById('a1');
+    expect(row?.status).toBe('failed');
+    expect(row?.failureCode).toBe('DECODE_FAILED');
+    expect(row?.contentText ?? null).toBeNull();
+  });
+
+  it('does not retry a DECODE_FAILED row at the same extractor version', async () => {
+    insertArticle('a1', 1);
+    const mojibake = `<html><body><p>${'\uFFFD'.repeat(400)}</p></body></html>`;
+    let fetches = 0;
+
+    const extraction = service({
+      fetchPage: async () => {
+        fetches += 1;
+        return { html: mojibake, finalUrl: 'https://example.com/x', status: 200 };
+      },
+    });
+
+    const first = await extraction.run();
+    expect(first.claimed).toBe(1);
+    expect(first.failed).toBe(1);
+
+    const afterFirst = await repository.findById('a1');
+    expect(afterFirst?.status).toBe('failed');
+    expect(afterFirst?.failureCode).toBe('DECODE_FAILED');
+    expect(afterFirst?.contentText ?? null).toBeNull();
+    expect(afterFirst?.attempts).toBe(1);
+
+    // A mis-decoded body is a property of the bytes, not of the moment, so the
+    // same extractor version must not spend another request on it.
+    const second = await extraction.run();
+
+    expect(second.claimed).toBe(0);
+    expect(second.failed).toBe(0);
+    expect(fetches).toBe(1);
+
+    const afterSecond = await repository.findById('a1');
+    expect(afterSecond?.attempts).toBe(1);
+    expect(afterSecond?.failureCode).toBe('DECODE_FAILED');
+    expect(afterSecond?.contentText ?? null).toBeNull();
+  });
+
   it('makes only one attempt per article per run', async () => {
     insertArticle('a1', 1);
     const summary = await service({
