@@ -14,6 +14,15 @@ import type { IngestionRunResult } from '../modules/ingestion/ingestion.types.js
  */
 export const EXIT_SUCCESS = 0;
 export const EXIT_FAILURE = 1;
+/**
+ * The command line was rejected before any work started.
+ *
+ * Distinct from `EXIT_FAILURE` so a supervisor can tell "the invocation was
+ * wrong" from "the run failed". Nothing was written and no request was sent
+ * when this is returned: argument validation happens before the database is
+ * opened.
+ */
+export const EXIT_USAGE = 2;
 export const EXIT_SIGINT = 130;
 export const EXIT_SIGTERM = 143;
 

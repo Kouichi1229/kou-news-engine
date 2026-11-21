@@ -107,6 +107,7 @@ async function run(options: RunOptions = {}): Promise<{
         };
 
   const result = await runCli({
+    execute: true,
     sources: [testSource('alpha'), testSource('beta')],
     exit: (code: number): void => {
       exitCalls.push(code);
@@ -403,6 +404,7 @@ describe('ingestion CLI — production wiring', () => {
     };
 
     const result = await runCli({
+      execute: true,
       sources: [],
       exit: (code: number): void => {
         exitCalls.push(code);
@@ -471,6 +473,7 @@ describe('ingestion CLI — production repository', () => {
     const exitCalls: number[] = [];
 
     const result = await runCli({
+      execute: true,
       sources: [testSource('alpha')],
       exit: (code: number): void => {
         exitCalls.push(code);

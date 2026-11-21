@@ -76,6 +76,26 @@ implemented yet.
 | `npm run lint`       | Lint the codebase                                 |
 | `npm run format`     | Format files with Prettier                        |
 | `npm run test`       | Run the test suite                                |
+| `npm run ingest`     | Feed ingestion dry-run, then exit                 |
+| `npm run extract`    | Article extraction dry-run, then exit             |
+
+### One-shot CLIs
+
+`npm run ingest` and `npm run extract` perform **no writes and no network
+requests** unless `--execute` is passed. With no argument they print a
+single-line JSON preview and exit `0`, so a scheduler that loses its flags
+cannot start real work by accident.
+
+```bash
+npm run ingest -- --help      # usage; opens no database
+npm run ingest                # dry-run preview
+npm run ingest -- --execute   # real ingestion
+```
+
+Both commands exit `2` when the command line is rejected, which is distinct from
+`1` (the run failed). The preview opens the database read-only: it never creates
+the file and never runs a migration, so it is safe against a database that must
+not change.
 
 ## API Endpoints
 
@@ -100,6 +120,9 @@ src/
   config/         Environment and constants
   core/           Logger, errors, HTTP handlers
   modules/health/ Health module
+  modules/ingestion/  Feed fetch, parse, persistence
+  modules/extraction/ Article fetch, parse, normalise, persistence
+  cli/            One-shot entry points (ingest, extract)
   routes/         Route aggregation
   types/          Shared API types
 ```

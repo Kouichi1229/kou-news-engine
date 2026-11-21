@@ -20,7 +20,7 @@ export default defineConfig({
       reportsDirectory: 'coverage',
       include: ['src/**/*.ts'],
       // Process entry points: they run on import, so no test can require them.
-      exclude: ['src/index.ts', 'src/cli/ingest.ts', 'src/types/**'],
+      exclude: ['src/index.ts', 'src/cli/ingest.ts', 'src/cli/extract.ts', 'src/types/**'],
     },
   },
 });

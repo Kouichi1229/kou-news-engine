@@ -24,8 +24,12 @@ interface ProbeResult {
   fetchCalls: number;
 }
 
-function runProbe(target: 'library' | 'entry', environment: Record<string, string>): ProbeResult {
-  const result = spawnSync(process.execPath, ['--import', 'tsx', probe, target], {
+function runProbe(
+  target: 'library' | 'entry',
+  environment: Record<string, string>,
+  args: readonly string[] = [],
+): ProbeResult {
+  const result = spawnSync(process.execPath, ['--import', 'tsx', probe, target, ...args], {
     cwd: repositoryRoot,
     env: {
       // A minimal, valid baseline. `PATH` is kept so Node can find its own
@@ -133,7 +137,9 @@ describe('CLI module evaluation — valid configuration', () => {
     // A valid environment with an unwritable database directory: the run starts,
     // fails at initialization, and never touches a feed. This is the only case
     // that proves normal execution still reaches `createRuntime`.
-    const result = runProbe('entry', { DATABASE_PATH: '/etc/hostname/x.db' });
+    // `--execute` because the default is now a dry-run, which never builds the
+    // runtime. This case exists to prove the real path is still reachable.
+    const result = runProbe('entry', { DATABASE_PATH: '/etc/hostname/x.db' }, ['--execute']);
 
     expect(result.stderr).toContain('PROBE_IMPORT_OK');
     expect(result.combined).toContain('initialization-failure');
@@ -143,7 +149,9 @@ describe('CLI module evaluation — valid configuration', () => {
 
   it('distinguishes a configuration failure from a runtime initialization failure', () => {
     const configuration = runProbe('entry', { NODE_ENV: 'not-a-real-environment' });
-    const initialization = runProbe('entry', { DATABASE_PATH: '/etc/hostname/x.db' });
+    const initialization = runProbe('entry', { DATABASE_PATH: '/etc/hostname/x.db' }, [
+      '--execute',
+    ]);
 
     // Configuration: the CLI never ran, so no outcome was classified.
     expect(configuration.stderr).toContain('crashed before it could report an outcome');

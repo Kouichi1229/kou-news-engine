@@ -317,9 +317,34 @@ Ingestion is a **one-shot CLI process**, not a background task of the HTTP
 server.
 
 ```
-npm run ingest          # development: tsx, src/cli/ingest.ts
-npm run ingest:prod     # production: node dist/cli/ingest.js
+npm run ingest                 # dry-run preview (default)
+npm run ingest -- --execute    # real ingestion
+npm run ingest:prod            # production: node dist/cli/ingest.js (still a dry-run)
 ```
+
+### Nothing runs unless asked
+
+Both one-shot CLIs default to a **dry-run**. Only the literal `--execute` token
+grants permission to write to the database or make a network request; every other
+successful parse previews instead. The rule is enforced in `src/cli/args.ts`,
+which the entry points consult before importing configuration or opening a
+database, so:
+
+- `--help` is answered and the process exits without evaluating `env.ts` and
+  without opening a database. A help request therefore works with no `.env`, an
+  invalid environment, and a database that does not exist — and does not create
+  it.
+- A misspelled or unknown argument exits `2` instead of being ignored. `--help`
+  does not excuse an unknown argument, and `--help` combined with a mode flag is
+  rejected rather than guessed at.
+
+A dry-run opens the database **read-only**: `openReadOnlyDatabase()` neither
+creates the file nor runs a migration, and pins the connection with
+`PRAGMA query_only`. It reads the write-ahead log rather than opening the file
+`immutable`, because an immutable connection silently ignores uncommitted WAL
+content and would under-report. The one filesystem effect is that SQLite
+maintains the `-shm` index while the connection is open; the database file and
+its `-wal` are left byte-identical.
 
 The process starts, runs exactly one pass over the configured sources, and exits.
 There is **no built-in scheduler**: nothing in this repository wakes up on a
@@ -343,10 +368,35 @@ silently writing to a repository that disappears when the process exits. The
 in-memory implementation exists for tests only. Because the CLI builds its
 runtime through `createRuntime()`, a production run always writes to SQLite.
 
+## Extraction execution model
+
+Extraction is the same shape as ingestion: a **one-shot CLI process**, run by an
+external scheduler, that never starts a server.
+
+```
+npm run extract                 # dry-run preview (default)
+npm run extract -- --execute    # real extraction
+npm run extract:prod            # production: node dist/cli/extract.js
+```
+
+It shares `src/cli/args.ts` and therefore the same safety rules: `--execute` is
+the only way to run real work, `--help` exits without touching a database, and a
+rejected command line exits `2`. The dry-run reports how many rows are currently
+claimable.
+
+That figure is an **estimate**, and the CLI labels it as one. It counts existing
+`article_contents` rows using the same predicate `claim` uses — the rule lives in
+one method, `eligibilitySql()`, so the preview cannot drift from the claim — but
+it does not seed. On a database that has never been extracted there are no rows
+yet, so the preview reports `0` while the next real run would first create a row
+per article. State can also change between the preview and the run.
+
 ## CLI exit codes
 
 The contract lives in `src/cli/exit-codes.ts` and is asserted in tests, not
-inferred from log text.
+inferred from log text. Extraction's codes live in
+`src/cli/extraction-exit-codes.ts`; the two are separate modules because their
+outcome types differ, but the numbers are shared conventions.
 
 | Outcome                               | Exit code |
 | ------------------------------------- | --------: |
@@ -359,6 +409,13 @@ inferred from log text.
 | `SIGTERM` cancellation                |       143 |
 | Runtime initialization failure        |         1 |
 | Unexpected error                      |         1 |
+| Rejected command line (usage)         |         2 |
+
+A dry-run preview exits `0` in both CLIs: it reports what it found, and a
+database that is missing or unreadable is reported as an unavailable count rather
+than repaired. `2` is reserved for a command line the parser refused, so a
+supervisor can distinguish "the invocation was wrong" from "the run failed".
+Nothing is written and no request is sent when `2` is returned.
 
 Two details that a supervisor script depends on:
 

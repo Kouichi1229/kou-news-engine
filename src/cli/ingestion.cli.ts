@@ -1,6 +1,7 @@
 import { createIngestionLifecycle } from '../core/lifecycle/ingestion-lifecycle.js';
 import type { SignalHost } from '../core/lifecycle/signal-coordinator.js';
 import { logger as defaultLogger } from '../core/logger.js';
+import { openReadOnlyDatabase, type ReadOnlyDatabase } from '../core/persistence/read-only.js';
 import type { FetchLike } from '../modules/ingestion/feed/feed.client.js';
 import {
   DEFAULT_INGESTION_DEADLINE_MS,
@@ -14,6 +15,7 @@ import type { Runtime } from '../runtime.js';
 import {
   classifyRun,
   exitCodeForOutcome,
+  EXIT_SUCCESS,
   type CancellingSignal,
   type CliOutcome,
 } from './exit-codes.js';
@@ -103,6 +105,30 @@ export interface CliDependencies {
 
   /** Defaults to the application logger. */
   logger?: CliLogger;
+
+  /**
+   * Set only by the entry point, and only for `--execute`.
+   *
+   * Absent or `false` means preview: no feed is fetched and nothing is written.
+   * Defaulting to preview at this level means a caller that forgets the flag
+   * cannot start real ingestion by accident.
+   */
+  execute?: boolean;
+
+  /**
+   * Opens the database read-only for the preview. Defaults to
+   * `openReadOnlyDatabase(env.DATABASE_PATH)`.
+   *
+   * Deliberately not `createRuntime`: that opens the writable handle, which
+   * creates the file and runs migrations. A preview may do neither.
+   */
+  openReadOnly?: (path: string) => ReadOnlyDatabase;
+
+  /** Database path used by the preview. Defaults to `env.DATABASE_PATH`. */
+  databasePath?: string;
+
+  /** Where the preview line is written. Defaults to `process.stdout`. */
+  writeStdout?: (line: string) => void;
 }
 
 export interface CliResult {
@@ -115,8 +141,77 @@ export interface CliResult {
  *
  * Returns the result rather than only exiting, so the decision is observable in
  * a test without a process boundary. `exit` is invoked exactly once.
+ *
+ * Without `execute` this previews instead of ingesting: it lists the sources
+ * that would be fetched and how many articles are already stored, then exits.
  */
 export async function runCli(dependencies: CliDependencies = {}): Promise<CliResult> {
+  return dependencies.execute === true
+    ? runIngestionPass(dependencies)
+    : previewIngestion(dependencies);
+}
+
+/**
+ * Reports what a real run would touch, without fetching or writing anything.
+ *
+ * The article count comes from a read-only connection, so a missing database is
+ * reported as unavailable rather than created. No feed request is made: the
+ * number of articles a run would add depends on the feeds themselves and cannot
+ * be known without fetching them, so it is not guessed.
+ */
+async function previewIngestion(dependencies: CliDependencies): Promise<CliResult> {
+  const log = dependencies.logger ?? defaultLogger;
+  const writeStdout =
+    dependencies.writeStdout ?? ((line: string): void => void process.stdout.write(`${line}\n`));
+  const exit = dependencies.exit ?? ((code: number): void => process.exit(code));
+
+  const sources = (dependencies.sources ?? enabledSources()).filter((source) => source.enabled);
+  const openReadOnly =
+    dependencies.openReadOnly ?? ((path: string): ReadOnlyDatabase => openReadOnlyDatabase(path));
+
+  let existingArticles: number | null = null;
+  let database: ReadOnlyDatabase | undefined;
+  try {
+    const path = dependencies.databasePath ?? (await import('../config/env.js')).env.DATABASE_PATH;
+    database = openReadOnly(path);
+    const row = database.query((connection) =>
+      connection.get('SELECT COUNT(*) AS n FROM articles'),
+    ) as { n: number } | undefined;
+    existingArticles = row?.n ?? 0;
+  } catch (error) {
+    // A preview of a database that does not exist yet is not a failure. The
+    // count is reported as unavailable and nothing is created to fill it in.
+    log.warn('Ingestion preview could not read the article count', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    database?.close();
+  }
+
+  writeStdout(
+    JSON.stringify({
+      mode: 'dry-run',
+      sources: sources.map((source) => source.id),
+      existingArticles,
+      note: 'no feed requests performed; new article count unavailable',
+    }),
+  );
+
+  const exitCode = EXIT_SUCCESS;
+  // Deliberately not logged: `logger.info` writes to stdout, and a preview's
+  // stdout must contain the JSON document and nothing else so a caller can parse
+  // it with one `JSON.parse(stdout)`.
+  exit(exitCode);
+  return { outcome: { kind: 'success' }, exitCode };
+}
+
+/**
+ * Runs one real ingestion pass.
+ *
+ * Reached only for `--execute`. Everything here may write to the database and
+ * make outbound requests.
+ */
+async function runIngestionPass(dependencies: CliDependencies): Promise<CliResult> {
   const log = dependencies.logger ?? defaultLogger;
   const exit = dependencies.exit ?? ((code: number): void => process.exit(code));
   // Deferred rather than a static import: `runtime.ts` reaches `env.ts` through

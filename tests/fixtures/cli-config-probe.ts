@@ -6,13 +6,15 @@
  * the caller, so an invalid configuration can be reproduced without touching the
  * runner's own process.
  *
- * Usage: node --import tsx cli-config-probe.ts <library|entry>
+ * Usage: node --import tsx cli-config-probe.ts <library|entry> [cli args...]
  *
  * `globalThis.fetch` is replaced before the target is imported, so any attempt to
  * reach the network is counted rather than performed. The count is reported on
  * `exit`, which also runs after `process.exit` is called from the target.
  */
 const target = process.argv[2];
+// Forwarded to the entry point, which reads `process.argv.slice(2)`.
+process.argv = [process.argv[0] ?? 'node', process.argv[1] ?? 'probe', ...process.argv.slice(3)];
 
 let fetchCalls = 0;
 globalThis.fetch = ((): never => {

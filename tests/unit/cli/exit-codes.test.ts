@@ -6,6 +6,7 @@ import {
   EXIT_SIGINT,
   EXIT_SIGTERM,
   EXIT_SUCCESS,
+  EXIT_USAGE,
   exitCodeForOutcome,
   type CliOutcome,
   type RunObservations,
@@ -91,6 +92,13 @@ describe('exitCodeForOutcome — the published contract', () => {
     expect(EXIT_FAILURE).toBe(1);
     expect(EXIT_SIGINT).toBe(130);
     expect(EXIT_SIGTERM).toBe(143);
+    expect(EXIT_USAGE).toBe(2);
+  });
+
+  it('keeps the usage code distinct from success and failure', () => {
+    // A supervisor must be able to tell "the invocation was wrong" from "the
+    // run failed", so the three codes cannot collide.
+    expect(new Set([EXIT_SUCCESS, EXIT_FAILURE, EXIT_USAGE]).size).toBe(3);
   });
 
   it('distinguishes the two cancellation signals', () => {
