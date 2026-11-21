@@ -420,7 +420,7 @@ describe('createRuntime — lifecycle ownership and readiness', () => {
     expect(database.isOpen).toBe(false);
   });
 
-  it('RT8: passes the lifecycle probe into the injected app factory', () => {
+  it('RT8: passes the lifecycle and database probes into the injected app factory', () => {
     const database = memoryDatabase();
     const seen: { probes?: readonly unknown[] | undefined } = {};
 
@@ -433,8 +433,12 @@ describe('createRuntime — lifecycle ownership and readiness', () => {
     });
     runtimes.push(runtime);
 
-    expect(seen.probes).toHaveLength(1);
-    expect((seen.probes?.[0] as { name: string }).name).toBe('lifecycle');
+    // Both dependencies are wired by the composition root; neither is optional,
+    // because a missing probe silently reports readiness it cannot verify.
+    expect(seen.probes?.map((probe) => (probe as { name: string }).name)).toEqual([
+      'lifecycle',
+      'database',
+    ]);
   });
 });
 

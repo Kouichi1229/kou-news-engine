@@ -5,6 +5,7 @@ import { createLifecycleState, type LifecycleState } from './core/lifecycle/life
 import { createRequestTracker, type RequestTracker } from './core/lifecycle/request-tracker.js';
 import { logger } from './core/logger.js';
 import { openDatabase, type SqliteDatabase, type SqliteQuery } from './core/persistence/sqlite.js';
+import { createDatabaseProbe } from './modules/health/database.probe.js';
 import { createDrainingProbe } from './modules/health/draining.probe.js';
 import type { ArticleRepository } from './modules/ingestion/repository/article.repository.js';
 import { SqliteArticleRepository } from './modules/ingestion/repository/sqlite-article.repository.js';
@@ -55,6 +56,24 @@ export interface RuntimeDependencies {
   createRepository?: (database: SqliteDatabase) => ArticleRepository;
   /** Defaults to `createApp(options)`. */
   createApp?: (options: AppOptions) => Express;
+}
+
+/**
+ * Answers whether the database can serve a query.
+ *
+ * Runs one trivial statement through the existing handle rather than opening a
+ * second connection: a probe connection would be a second thing to close, and it
+ * would answer for a database the application is not actually using. `query()`
+ * already rejects use of a closed handle, so disposal is observed without this
+ * function tracking state of its own.
+ *
+ * Any throw propagates; `getReady` classifies it as `probe_failed`. That covers a
+ * driver error and a closed handle alike, and keeps the endpoint from deciding
+ * what an exception meant.
+ */
+function probeDatabase(database: SqliteDatabase): boolean {
+  const row = database.query((connection) => connection.get('SELECT 1 AS ok'));
+  return row !== undefined;
 }
 
 /**
@@ -143,8 +162,14 @@ export function createRuntime(deps: RuntimeDependencies = {}): Runtime {
     // instance the shutdown handler later waits on.
     const requests = createRequestTracker();
 
+    // Both dependencies are read on every request. `createDrainingProbe`
+    // reports the lifecycle; `createDatabaseProbe` queries the handle this
+    // Runtime owns. Neither opens a resource of its own.
     const app = buildApp({
-      readinessProbes: [createDrainingProbe(lifecycle)],
+      readinessProbes: [
+        createDrainingProbe(lifecycle),
+        createDatabaseProbe(() => probeDatabase(database)),
+      ],
       requestTracking: { tracker: requests, lifecycle },
     });
     const publicDatabase = restrictDatabase(database);

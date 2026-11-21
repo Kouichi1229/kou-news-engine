@@ -1,10 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type {
   FetchLike,
   FetchResponseLike,
 } from '../../../../src/modules/ingestion/feed/feed.client.js';
-import { runIngestion } from '../../../../src/modules/ingestion/ingestion.service.js';
+import {
+  DEFAULT_INGESTION_DEADLINE_MS,
+  runIngestion,
+  type RunIngestionOptions,
+} from '../../../../src/modules/ingestion/ingestion.service.js';
+import { createCancellationSignal } from '../../../../src/core/lifecycle/cancellation.js';
 import type { ArticleRepository } from '../../../../src/modules/ingestion/repository/article.repository.js';
 import { InMemoryArticleRepository } from '../../../../src/modules/ingestion/repository/in-memory-article.repository.js';
 import type { FeedSource } from '../../../../src/modules/ingestion/sources/source.schema.js';
@@ -666,5 +671,604 @@ describe('runIngestion — persistence', () => {
 
     // Non-atomic: the first article survived, the second never landed.
     await expect(repository.count()).resolves.toBe(1);
+  });
+});
+
+describe('runIngestion — required repository', () => {
+  it('rejects a call that omits the repository instead of writing to a throwaway store', async () => {
+    const { fetchImpl, calls } = fetcher({});
+
+    // Reaching the runtime guard the way an untyped caller would: the option
+    // object is built as a wider record and cast, so the compiler cannot reject
+    // it and only the guard stands between the caller and a network run.
+    const untyped = {
+      sources: [source('src-a')],
+      fetchImpl,
+      now: clock(),
+    } as unknown as RunIngestionOptions;
+
+    await expect(runIngestion(untyped)).rejects.toThrow(
+      'runIngestion requires an explicit repository',
+    );
+
+    // The guard runs before any source is fetched: no network work is wasted.
+    expect(calls).toEqual([]);
+  });
+
+  it('does not fall back to an implicit in-memory repository', async () => {
+    // A missing repository must fail, not silently succeed against a store the
+    // caller never saw. Success here would mean the fallback survived.
+    const { fetchImpl } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+    });
+
+    const untyped = {
+      sources: [source('src-a')],
+      fetchImpl,
+      now: clock(),
+    } as unknown as RunIngestionOptions;
+
+    await expect(runIngestion(untyped)).rejects.toThrow(TypeError);
+  });
+
+  it('writes only to the repository the caller supplies', async () => {
+    const supplied = new InMemoryArticleRepository();
+    const { fetchImpl } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+    });
+
+    const result = await runIngestion({
+      sources: [source('src-a')],
+      repository: supplied,
+      fetchImpl,
+      now: clock(),
+    });
+
+    expect(result.articleCount).toBe(1);
+    await expect(supplied.count()).resolves.toBe(1);
+  });
+
+  it('is a required parameter at the type level', () => {
+    // Compile-time assertion: omitting `repository` must be a type error. If the
+    // property ever became optional again, this directive would be unused and
+    // `tsc` would fail the build.
+    // @ts-expect-error repository is mandatory
+    const options: RunIngestionOptions = { sources: [] };
+    expect(options).toBeDefined();
+  });
+
+  it('rejects a call with no argument at all from an untyped runtime caller', async () => {
+    // A plain-JavaScript caller can omit the argument entirely, so the function
+    // receives `undefined` despite the TypeScript signature. `fetch` is stubbed
+    // rather than observed: if the guard ever regressed, the call would fall
+    // through to the enabled sources and hit the real network, which a unit test
+    // must never do.
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() => Promise.reject(new Error('network disabled in test')));
+
+    try {
+      const call = runIngestion as unknown as () => Promise<unknown>;
+      const error = await call().catch((caught: unknown) => caught);
+
+      // A TypeError, not a property-read error on `undefined`.
+      expect(error).toBeInstanceOf(TypeError);
+      expect((error as Error).message).toBe('runIngestion requires an explicit repository');
+
+      // Rejecting here also means nothing was persisted: no repository was
+      // reached, implicit or otherwise.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+/**
+ * A clock that advances only when told to, so deadline tests never wait.
+ *
+ * Injected wherever the service asks for elapsed time; each `advance` is what a
+ * real `performance.now()` would have done between two sources.
+ */
+function fakeClock(start = 0): { clock: () => number; advance: (ms: number) => void } {
+  let elapsed = start;
+  return {
+    clock: () => elapsed,
+    advance: (ms: number) => {
+      elapsed += ms;
+    },
+  };
+}
+
+describe('runIngestion — deadline', () => {
+  it('defaults to 300000ms', async () => {
+    // The clock jumps past the default only after the first source completed, so
+    // the second source is skipped. A smaller default would skip the first.
+    const fake = fakeClock();
+    const { fetchImpl, calls } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+      'https://src-b.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'B', link: 'https://example.com/b' }]),
+      }),
+    });
+
+    const tickingFetch: FetchLike = async (url, init) => {
+      const result = await fetchImpl(url, init);
+      // Consume 299s on the first source: still inside the 300s default.
+      fake.advance(299_000);
+      return result;
+    };
+
+    const result = await runIngestion({
+      sources: [source('src-a'), source('src-b')],
+      repository: new InMemoryArticleRepository(),
+      fetchImpl: tickingFetch,
+      now: clock(),
+      clock: fake.clock,
+    });
+
+    expect(DEFAULT_INGESTION_DEADLINE_MS).toBe(300_000);
+    // 299s < 300s, so the second source still runs and neither is skipped.
+    expect(calls).toHaveLength(2);
+    expect(result.stoppedReason).toBeUndefined();
+  });
+
+  it('accepts a custom deadline and stops before the next source once it is spent', async () => {
+    const fake = fakeClock();
+    const { fetchImpl } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+      'https://src-b.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'B', link: 'https://example.com/b' }]),
+      }),
+    });
+
+    const slowFirst: FetchLike = async (url, init) => {
+      const result = await fetchImpl(url, init);
+      fake.advance(1_500);
+      return result;
+    };
+
+    const result = await runIngestion({
+      sources: [source('src-a'), source('src-b')],
+      repository: new InMemoryArticleRepository(),
+      fetchImpl: slowFirst,
+      now: clock(),
+      clock: fake.clock,
+      deadlineMs: 1_000,
+    });
+
+    // 1500ms spent against a 1000ms budget: the second source never starts.
+    expect(result.stoppedReason).toBe('deadline');
+    expect(result.sources.map((entry) => entry.status)).toEqual(['ok', 'skipped']);
+  });
+
+  it('starts a source while the deadline has not expired', async () => {
+    const fake = fakeClock();
+    const { fetchImpl, calls } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+      'https://src-b.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'B', link: 'https://example.com/b' }]),
+      }),
+    });
+
+    const result = await runIngestion({
+      sources: [source('src-a'), source('src-b')],
+      repository: new InMemoryArticleRepository(),
+      fetchImpl,
+      now: clock(),
+      clock: fake.clock,
+      deadlineMs: 1_000,
+    });
+
+    // Time never advances, so both sources run and nothing is skipped.
+    expect(calls).toHaveLength(2);
+    expect(result.stoppedReason).toBeUndefined();
+    expect(result.sources.every((entry) => entry.status === 'ok')).toBe(true);
+  });
+
+  it('does not abort a fetch that is still running when the deadline passes', async () => {
+    const fake = fakeClock();
+    let completed = false;
+    const { fetchImpl, calls } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+    });
+
+    const slowFirst: FetchLike = async (url, init) => {
+      // Time runs out *during* the fetch, not after it.
+      fake.advance(5_000);
+      const result = await fetchImpl(url, init);
+      completed = true;
+      return result;
+    };
+
+    const result = await runIngestion({
+      sources: [source('src-a')],
+      repository: new InMemoryArticleRepository(),
+      fetchImpl: slowFirst,
+      now: clock(),
+      clock: fake.clock,
+      deadlineMs: 1_000,
+    });
+
+    // The fetch ran to completion despite the deadline: it was never aborted.
+    expect(calls).toEqual(['https://src-a.example.com/feed.xml']);
+    expect(completed).toBe(true);
+    expect(result.sources[0]).toMatchObject({ sourceId: 'src-a', status: 'ok', recordCount: 1 });
+  });
+
+  it('persists articles collected before the deadline expired', async () => {
+    const fake = fakeClock();
+    const repository = new InMemoryArticleRepository();
+    const { fetchImpl } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+      'https://src-b.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'B', link: 'https://example.com/b' }]),
+      }),
+    });
+
+    const slowFirst: FetchLike = async (url, init) => {
+      const result = await fetchImpl(url, init);
+      fake.advance(2_000);
+      return result;
+    };
+
+    const result = await runIngestion({
+      sources: [source('src-a'), source('src-b')],
+      repository,
+      fetchImpl: slowFirst,
+      now: clock(),
+      clock: fake.clock,
+      deadlineMs: 1_000,
+    });
+
+    // Deduplication and persistence still ran over the one collected record.
+    expect(result.articleCount).toBe(1);
+    await expect(repository.count()).resolves.toBe(1);
+  });
+
+  it('marks unexecuted sources as skipped with the deadline reason, never as errors', async () => {
+    const fake = fakeClock();
+    const { fetchImpl } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+    });
+
+    const slowFirst: FetchLike = async (url, init) => {
+      const result = await fetchImpl(url, init);
+      fake.advance(2_000);
+      return result;
+    };
+
+    const result = await runIngestion({
+      sources: [source('src-a'), source('src-b'), source('src-c')],
+      repository: new InMemoryArticleRepository(),
+      fetchImpl: slowFirst,
+      now: clock(),
+      clock: fake.clock,
+      deadlineMs: 1_000,
+    });
+
+    expect(result.sources).toEqual([
+      { sourceId: 'src-a', status: 'ok', itemCount: 1, recordCount: 1, skippedCount: 0 },
+      {
+        sourceId: 'src-b',
+        status: 'skipped',
+        itemCount: 0,
+        recordCount: 0,
+        skippedCount: 0,
+        skipReason: 'deadline',
+      },
+      {
+        sourceId: 'src-c',
+        status: 'skipped',
+        itemCount: 0,
+        recordCount: 0,
+        skippedCount: 0,
+        skipReason: 'deadline',
+      },
+    ]);
+    // Nothing was reported as an error: the run was cut short, not broken.
+    expect(result.sources.some((entry) => entry.status === 'error')).toBe(false);
+  });
+
+  it('skips the very first source when the budget is already spent by the first boundary check', async () => {
+    // The deadline is measured from run start, so it cannot be "already expired"
+    // before the run — `deadlineAt` is always `now + deadlineMs`. What is
+    // reachable is a clock that advances between arming the deadline and the
+    // first boundary check: a wall-clock step or a slow pre-run step. The first
+    // source must then be skipped rather than started.
+    let reads = 0;
+    const steppingClock = (): number => {
+      reads += 1;
+      return reads === 1 ? 0 : 5_000;
+    };
+    const { fetchImpl, calls } = fetcher({});
+
+    const result = await runIngestion({
+      sources: [source('src-a')],
+      repository: new InMemoryArticleRepository(),
+      fetchImpl,
+      now: clock(),
+      clock: steppingClock,
+      deadlineMs: 1_000,
+    });
+
+    // 5000ms elapsed against a 1000ms budget before the first fetch was due.
+    expect(calls).toEqual([]);
+    expect(result.sources[0]).toMatchObject({ status: 'skipped', skipReason: 'deadline' });
+    expect(result.stoppedReason).toBe('deadline');
+  });
+
+  it('rejects a deadline that cannot describe a duration', async () => {
+    for (const invalid of [
+      0,
+      -1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      -Number.POSITIVE_INFINITY,
+    ]) {
+      await expect(
+        runIngestion({
+          sources: [],
+          repository: new InMemoryArticleRepository(),
+          deadlineMs: invalid,
+        }),
+      ).rejects.toThrow(RangeError);
+    }
+  });
+
+  it('does not let a NaN deadline disable the guard silently', async () => {
+    // Guards the specific failure mode where NaN comparisons are all false and
+    // the run would behave as if it had unlimited time.
+    const error = await runIngestion({
+      sources: [],
+      repository: new InMemoryArticleRepository(),
+      deadlineMs: Number.NaN,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(RangeError);
+    expect((error as Error).message).toContain('deadlineMs');
+  });
+});
+
+describe('runIngestion — cancellation signal', () => {
+  it('runs normally while the signal is untouched', async () => {
+    const signal = createCancellationSignal();
+    const { fetchImpl, calls } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+    });
+
+    const result = await runIngestion({
+      sources: [source('src-a')],
+      repository: new InMemoryArticleRepository(),
+      fetchImpl,
+      now: clock(),
+      signal,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(result.stoppedReason).toBeUndefined();
+    expect(result.sources[0]).toMatchObject({ status: 'ok' });
+  });
+
+  it('stops starting new sources once cancelled and keeps the completed ones', async () => {
+    const signal = createCancellationSignal();
+    const { fetchImpl, calls } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+      'https://src-b.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'B', link: 'https://example.com/b' }]),
+      }),
+    });
+
+    const cancelAfterFirst: FetchLike = async (url, init) => {
+      const result = await fetchImpl(url, init);
+      signal.cancel('signal');
+      return result;
+    };
+
+    const result = await runIngestion({
+      sources: [source('src-a'), source('src-b')],
+      repository: new InMemoryArticleRepository(),
+      fetchImpl: cancelAfterFirst,
+      now: clock(),
+      signal,
+    });
+
+    // The second source was never fetched; the first one's result survived.
+    expect(calls).toEqual(['https://src-a.example.com/feed.xml']);
+    expect(result.sources.map((entry) => entry.status)).toEqual(['ok', 'skipped']);
+    expect(result.stoppedReason).toBe('signal');
+  });
+
+  it('saves the articles collected before cancellation', async () => {
+    const signal = createCancellationSignal();
+    const repository = new InMemoryArticleRepository();
+    const { fetchImpl } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+    });
+
+    const cancelAfterFirst: FetchLike = async (url, init) => {
+      const result = await fetchImpl(url, init);
+      signal.cancel('signal');
+      return result;
+    };
+
+    const result = await runIngestion({
+      sources: [source('src-a'), source('src-b')],
+      repository,
+      fetchImpl: cancelAfterFirst,
+      now: clock(),
+      signal,
+    });
+
+    // Persistence is not skipped just because the run was cut short.
+    expect(result.articleCount).toBe(1);
+    await expect(repository.count()).resolves.toBe(1);
+  });
+
+  it('distinguishes a signal cancellation from a deadline expiry', async () => {
+    const signal = createCancellationSignal();
+    const fake = fakeClock();
+    const { fetchImpl } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+    });
+
+    const cancelAndSpendBudget: FetchLike = async (url, init) => {
+      const result = await fetchImpl(url, init);
+      // Both conditions become true at once. The signal is checked first, so it
+      // is the reason reported: an operator's request outranks a budget.
+      signal.cancel('signal');
+      fake.advance(9_999);
+      return result;
+    };
+
+    const result = await runIngestion({
+      sources: [source('src-a'), source('src-b')],
+      repository: new InMemoryArticleRepository(),
+      fetchImpl: cancelAndSpendBudget,
+      now: clock(),
+      clock: fake.clock,
+      deadlineMs: 1_000,
+      signal,
+    });
+
+    expect(result.stoppedReason).toBe('signal');
+    expect(result.sources[1]).toMatchObject({ status: 'skipped', skipReason: 'signal' });
+  });
+
+  it('reports a deadline expiry as deadline, not as a signal', async () => {
+    const signal = createCancellationSignal();
+    const fake = fakeClock();
+    const { fetchImpl } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+    });
+
+    const spendBudget: FetchLike = async (url, init) => {
+      const result = await fetchImpl(url, init);
+      fake.advance(9_999);
+      return result;
+    };
+
+    const result = await runIngestion({
+      sources: [source('src-a'), source('src-b')],
+      repository: new InMemoryArticleRepository(),
+      fetchImpl: spendBudget,
+      now: clock(),
+      clock: fake.clock,
+      deadlineMs: 1_000,
+      signal,
+    });
+
+    expect(signal.isCancelled()).toBe(false);
+    expect(result.stoppedReason).toBe('deadline');
+    expect(result.sources[1]).toMatchObject({ status: 'skipped', skipReason: 'deadline' });
+  });
+
+  it('still rejects when persistence fails after cancellation', async () => {
+    const signal = createCancellationSignal();
+    // Wraps a real repository so the failure comes from the save path itself.
+    const inner = new InMemoryArticleRepository();
+    const failing: ArticleRepository = {
+      save: (article) => inner.save(article),
+      saveMany: () => Promise.reject(new Error('disk full')),
+      findById: (id) => inner.findById(id),
+      findAll: () => inner.findAll(),
+      has: (id) => inner.has(id),
+      delete: (id) => inner.delete(id),
+      clear: () => inner.clear(),
+      count: () => inner.count(),
+    };
+    const { fetchImpl } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+    });
+
+    const cancelAfterFirst: FetchLike = async (url, init) => {
+      const result = await fetchImpl(url, init);
+      signal.cancel('signal');
+      return result;
+    };
+
+    await expect(
+      runIngestion({
+        sources: [source('src-a')],
+        repository: failing,
+        fetchImpl: cancelAfterFirst,
+        now: clock(),
+        signal,
+      }),
+    ).rejects.toThrow('disk full');
+  });
+
+  it('does not report a cancelled run as every source having failed', async () => {
+    const signal = createCancellationSignal();
+    const { fetchImpl } = fetcher({
+      'https://src-a.example.com/feed.xml': response(200, {
+        body: rss([{ title: 'A', link: 'https://example.com/a' }]),
+      }),
+    });
+
+    const cancelAfterFirst: FetchLike = async (url, init) => {
+      const result = await fetchImpl(url, init);
+      signal.cancel('signal');
+      return result;
+    };
+
+    const result = await runIngestion({
+      sources: [source('src-a'), source('src-b')],
+      repository: new InMemoryArticleRepository(),
+      fetchImpl: cancelAfterFirst,
+      now: clock(),
+      signal,
+    });
+
+    // `skipped` is not `error`: a cut-short run is not a failed one.
+    expect(result.sources.filter((entry) => entry.status === 'error')).toEqual([]);
+    expect(result.stoppedReason).toBe('signal');
+  });
+
+  it('does not fetch anything when the signal was already cancelled', async () => {
+    const signal = createCancellationSignal();
+    signal.cancel('signal');
+    const { fetchImpl, calls } = fetcher({});
+
+    const result = await runIngestion({
+      sources: [source('src-a'), source('src-b')],
+      repository: new InMemoryArticleRepository(),
+      fetchImpl,
+      now: clock(),
+      signal,
+    });
+
+    expect(calls).toEqual([]);
+    expect(result.stoppedReason).toBe('signal');
+    expect(result.sources.every((entry) => entry.status === 'skipped')).toBe(true);
+    expect(result.articleCount).toBe(0);
   });
 });

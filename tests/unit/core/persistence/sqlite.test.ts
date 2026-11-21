@@ -245,6 +245,74 @@ describe('openDatabase — creation and lifecycle', () => {
     expect(mode.journal_mode).toBe('wal');
     handle.close();
   });
+
+  it('sets a 5 second busy timeout on a file database', () => {
+    const directory = temporaryDirectory();
+    const handle = openTrackedDatabase(join(directory, 'busy.db'));
+
+    try {
+      // Read back from the live connection: busy_timeout is connection state, so
+      // this is the only way to prove it was applied rather than merely issued.
+      const pragma = handle.query((connection) => connection.get('PRAGMA busy_timeout')) as {
+        timeout: number;
+      };
+
+      expect(pragma.timeout).toBe(5000);
+    } finally {
+      handle.close();
+    }
+
+    expect(handle.isOpen).toBe(false);
+  });
+
+  it('sets the busy timeout on in-memory databases too', () => {
+    // busy_timeout is per connection and never persisted in the file, so every
+    // connection has to set it. In-memory is the cheapest proof that the same
+    // initialisation path runs for both kinds of database.
+    const handle = openDatabase({ path: ':memory:' });
+
+    try {
+      const pragma = handle.query((connection) => connection.get('PRAGMA busy_timeout')) as {
+        timeout: number;
+      };
+
+      expect(pragma.timeout).toBe(5000);
+    } finally {
+      handle.close();
+    }
+
+    expect(handle.isOpen).toBe(false);
+  });
+
+  it('applies the busy timeout before migrations run', () => {
+    const directory = temporaryDirectory();
+    const path = join(directory, 'busy-before-migrations.db');
+
+    // Captures the live connection setting from inside a migration. If the
+    // pragma were applied after `runMigrations`, this row would read 0.
+    const capturing: Migration = {
+      version: 1,
+      name: 'capture_busy_timeout',
+      statements: ['CREATE TABLE captured (timeout INTEGER NOT NULL)'],
+    };
+    const observer: Migration = {
+      version: 2,
+      name: 'observe_busy_timeout',
+      statements: ['INSERT INTO captured (timeout) SELECT timeout FROM pragma_busy_timeout'],
+    };
+
+    const handle = openDatabase({ path, migrations: [capturing, observer] });
+    try {
+      const row = handle.query((connection) => connection.get('SELECT timeout FROM captured')) as
+        { timeout: number } | undefined;
+
+      expect(row?.timeout).toBe(5000);
+    } finally {
+      handle.close();
+    }
+
+    expect(handle.isOpen).toBe(false);
+  });
 });
 
 describe('openDatabase — failure handling', () => {
@@ -1690,6 +1758,72 @@ describe('openDatabase — error propagation', () => {
 
     expect(error).toBeInstanceOf(DatabaseOpenError);
     expect((error as DatabaseOpenError).cause).toBe(failure);
+  });
+
+  it('closes the handle when a real migration fails on a real file database', () => {
+    const directory = temporaryDirectory();
+    const path = join(directory, 'migration-failure.db');
+
+    const broken: Migration = {
+      version: 1,
+      name: 'broken',
+      statements: ['CREATE TABLE half_applied (id TEXT PRIMARY KEY)', 'THIS IS NOT VALID SQL'],
+    };
+
+    let error: unknown;
+    try {
+      openDatabase({ path, migrations: [broken] });
+    } catch (caught) {
+      error = caught;
+    }
+
+    // The connection opened, the migration failed, and the caller is told so.
+    expect(error).toBeInstanceOf(DatabaseOpenError);
+    const cause = (error as DatabaseOpenError).cause;
+    expect(cause).toBeInstanceOf(MigrationError);
+    expect((cause as MigrationError).version).toBe(1);
+    expect((cause as MigrationError).message).toContain('Migration 1 failed');
+
+    // The failed open must have released its connection, so the file is usable
+    // afterwards and already migrated to the current version.
+    const reopened = openTrackedDatabase(path);
+    try {
+      expect(reopened.isOpen).toBe(true);
+      expect(reopened.version).toBe(LATEST_VERSION);
+      expect(reopened.query((query) => query.all('SELECT 1 AS ok'))).toEqual([{ ok: 1 }]);
+    } finally {
+      reopened.close();
+    }
+
+    expect(reopened.isOpen).toBe(false);
+  });
+
+  it('leaves no half-applied schema behind after a real migration failure', () => {
+    const directory = temporaryDirectory();
+    const path = join(directory, 'half-applied.db');
+
+    const broken: Migration = {
+      version: 1,
+      name: 'broken',
+      statements: ['CREATE TABLE half_applied (id TEXT PRIMARY KEY)', 'THIS IS NOT VALID SQL'],
+    };
+
+    expect(() => openDatabase({ path, migrations: [broken] })).toThrow(DatabaseOpenError);
+
+    // The rollback must have removed the table created by the first statement,
+    // so a later open does not see a schema the code never intended.
+    const reopened = openTrackedDatabase(path);
+    let tables: Array<{ name: string }>;
+    try {
+      tables = reopened.query((query) =>
+        query.all("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"),
+      ) as Array<{ name: string }>;
+    } finally {
+      reopened.close();
+    }
+
+    expect(tables.map((row) => row.name)).not.toContain('half_applied');
+    expect(reopened.isOpen).toBe(false);
   });
 });
 

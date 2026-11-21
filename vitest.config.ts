@@ -10,7 +10,8 @@ export default defineConfig({
       reporter: ['text', 'html', 'lcov'],
       reportsDirectory: 'coverage',
       include: ['src/**/*.ts'],
-      exclude: ['src/index.ts', 'src/types/**'],
+      // Process entry points: they run on import, so no test can require them.
+      exclude: ['src/index.ts', 'src/cli/ingest.ts', 'src/types/**'],
     },
   },
 });

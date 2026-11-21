@@ -31,6 +31,12 @@ COPY --from=deps  --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist         ./dist
 COPY --chown=node:node package.json ./
 
+# Mount point for the persistent volume, created before dropping privileges:
+# /app is root-owned, so the `node` user could not create it at runtime. Docker
+# seeds a fresh named volume with this directory's ownership, which makes the
+# volume writable by the runtime user as well.
+RUN mkdir -p /app/data && chown node:node /app/data
+
 USER node
 
 EXPOSE 3000

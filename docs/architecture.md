@@ -5,8 +5,11 @@ global AI news, translates and summarizes articles into Traditional Chinese,
 generates daily briefings, and delivers notifications through Kou AI and a
 Telegram bot.
 
-This document describes the architecture as it exists today (Milestone 0) and
-separates clearly what is implemented from what is only planned.
+This document describes the architecture as it exists today and separates
+clearly what is implemented from what is only planned. Implemented today: the
+HTTP server with liveness and readiness endpoints, and a one-shot, SQLite-backed
+ingestion CLI. Not implemented: translation, summarization, briefing generation,
+notification delivery, and scheduling.
 
 ## Architectural style
 
@@ -28,9 +31,16 @@ avoiding the operational cost of distributed systems at this stage.
 
 ```
 src/
-  index.ts          Process entry point: starts the server, wires shutdown
+  index.ts          HTTP process entry point: starts the server, wires shutdown
   app.ts            Express application factory (middleware + route mounting)
   server.ts         HTTP server lifecycle (start, close)
+  runtime.ts        Composition root: owns the database handle, repository,
+                    lifecycle state and request tracker for one process
+  cli/
+    ingest.ts           One-shot ingestion entry point (separate process)
+    ingestion.cli.ts    CLI orchestration: runtime + run + outcome -> exit code
+    exit-codes.ts       Exit-code contract and run classifier
+    signal-recorder.ts  Records which signal arrived, without a second listener
   config/
     constants.ts    Static application constants
     env.ts          Environment schema and validated `env` export
@@ -38,13 +48,19 @@ src/
     logger.ts       Minimal structured JSON logger
     errors.ts       AppError base class and NotFoundError
     lifecycle/
-      lifecycle-state.ts  One-way process lifecycle state (running → draining)
-      request-tracker.ts  In-flight request accounting and idle waiting
-      shutdown.ts         Shutdown orchestration
+      lifecycle-state.ts    One-way process lifecycle state (running → draining)
+      request-tracker.ts    In-flight request accounting and idle waiting
+      shutdown.ts           Shutdown orchestration for the HTTP server
+      cancellation.ts       Per-run cancellation signal
+      signal-coordinator.ts SIGINT/SIGTERM subscription and forced-terminate
+      ingestion-lifecycle.ts Signal handling around one ingestion run
     http/
       not-found.ts      Catch-all handler that raises NotFoundError
       error-handler.ts  Central error middleware
       request-tracking.ts  Middleware feeding the request tracker
+    persistence/
+      sqlite.ts         SQLite handle, connection pragmas, transaction helper
+      migrations.ts     Versioned schema migrations
   modules/
     health/         Health and readiness module
       health.routes.ts
@@ -52,16 +68,29 @@ src/
       health.service.ts
       readiness.ts      Readiness probe abstraction
       draining.probe.ts Readiness entry reporting the lifecycle state
+      database.probe.ts Readiness entry reporting database usability
+    ingestion/      News ingestion module
+      ingestion.service.ts    One pass over the configured sources
+      ingestion.types.ts      Run and per-source result types
+      sources/                Source definitions and validation
+      feed/                   HTTP feed client, parser and mapper
+      dedupe/                 Canonical URL, content hash, title key, dedupe
+      repository/             Article storage boundary + SQLite and in-memory
+                              implementations
   routes/
     index.ts        Aggregates module routers under the /api base path
   types/
     api.ts          Shared API response types
+    article.ts      Article domain type
 ```
 
 ### Implemented modules
 
 - **health** — exposes `GET /api/health` (liveness) and `GET /api/ready`
-  (readiness). This is the only feature module implemented at Milestone 0.
+  (readiness).
+- **ingestion** — fetches the configured news feeds, parses and deduplicates the
+  entries, and stores articles through an `ArticleRepository`. It is driven by a
+  **one-shot CLI**, not by the HTTP server; see _Ingestion execution model_.
 
 ### Lifecycle state ownership
 
@@ -82,7 +111,7 @@ The state lives in `core`, not in a module, for two reasons:
 with it:
 
 - wraps it in a readiness probe (`createDrainingProbe`) and injects that probe
-  into the app it builds, and
+  into the app it builds, alongside the database probe described below, and
 - exposes it as `Runtime.lifecycle`.
 
 `src/index.ts` passes `runtime.lifecycle.beginDraining` to the shutdown handler.
@@ -99,6 +128,50 @@ observable behaviour, so a boolean is the whole model.
 - **config** — validated, typed environment configuration.
 - **core** — cross-cutting concerns: logging, error types, HTTP error handling.
 - **types** — shared TypeScript types for API payloads.
+
+### Liveness and readiness
+
+The two endpoints answer different questions and are wired so they cannot
+accidentally answer the same one.
+
+| Endpoint          | Question                             | 200             | 503             |
+| ----------------- | ------------------------------------ | --------------- | --------------- |
+| `GET /api/health` | Is the process running?              | always          | never           |
+| `GET /api/ready`  | Should this process receive traffic? | all checks pass | any check fails |
+
+**Liveness never consults the database.** A SQLite outage is not a reason to
+restart the process: the connection may recover, and a restart would not fix a
+locked or corrupt file. `/api/health` therefore returns 200 while the database is
+broken, while the process is draining, and even after the runtime is disposed.
+Only readiness changes.
+
+**Readiness fails closed.** `getReady` treats a throwing probe as `not_ready` with
+the fixed reason code `probe_failed`, so a misbehaving dependency produces a 503
+rather than a 500. Every probe runs on every request, and one failing probe does
+not mask the others: each result appears under its own key in `checks`.
+
+Two probes are wired by `src/runtime.ts`:
+
+- `lifecycle` (`createDrainingProbe`) — reports `draining` once shutdown begins.
+- `database` (`createDatabaseProbe`) — reports `database_unavailable` when the
+  check returns `false`, and `probe_failed` when it throws.
+
+The database probe runs one trivial statement (`SELECT 1`) through the handle the
+Runtime already owns. It does not open a second connection: an extra connection
+would be another resource to close and would report on a database the application
+is not using. Because `SqliteDatabase.query()` rejects a closed handle, disposal
+is observed without the probe tracking state of its own — after `dispose()` the
+check throws and readiness reports 503.
+
+Nothing about the probe reaches the response except `ready` and the reason code.
+Exception messages are discarded, because they can carry SQL text, filesystem
+paths, or a connection string, and the endpoint is unauthenticated.
+
+**The container healthcheck probes liveness only.** The `HEALTHCHECK` in the
+`Dockerfile` calls `/api/health`, so a passing healthcheck means the process is
+alive — it does **not** prove the database is readable or that the service could
+serve a request. To gate traffic on database availability, probe `/api/ready`
+instead; the two endpoints are separate for exactly this reason.
 
 ## Module boundaries and dependency direction
 
@@ -238,6 +311,228 @@ always run out its deadline, force sockets closed, and exit `1`. Any future SSE
 or WebSocket feature must implement its own draining hook — a signal to finish
 the stream — rather than relying on this mechanism.
 
+## Ingestion execution model
+
+Ingestion is a **one-shot CLI process**, not a background task of the HTTP
+server.
+
+```
+npm run ingest          # development: tsx, src/cli/ingest.ts
+npm run ingest:prod     # production: node dist/cli/ingest.js
+```
+
+The process starts, runs exactly one pass over the configured sources, and exits.
+There is **no built-in scheduler**: nothing in this repository wakes up on a
+timer. An external scheduler — cron, a systemd timer, a container orchestrator's
+job, or a CI schedule — is expected to invoke the CLI on whatever cadence is
+wanted. `APP_TIMEZONE` exists for a future scheduler milestone but is not read by
+this runtime today, and no job is currently scheduled at 08:00 or any other time.
+
+The two entry points are deliberately separate processes:
+
+- `src/index.ts` starts the HTTP server and **never imports the ingestion
+  module**; a server start can therefore never trigger a fetch.
+- `src/cli/ingest.ts` runs one ingestion pass and **never starts a server**.
+
+Both share the composition root `createRuntime()` (`src/runtime.ts`), so the CLI
+uses the same SQLite-backed `ArticleRepository` the server would.
+
+`runIngestion` requires an explicit `repository`. There is **no implicit
+in-memory fallback**: passing no repository throws a `TypeError` rather than
+silently writing to a repository that disappears when the process exits. The
+in-memory implementation exists for tests only. Because the CLI builds its
+runtime through `createRuntime()`, a production run always writes to SQLite.
+
+## CLI exit codes
+
+The contract lives in `src/cli/exit-codes.ts` and is asserted in tests, not
+inferred from log text.
+
+| Outcome                               | Exit code |
+| ------------------------------------- | --------: |
+| All attempted sources succeeded       |         0 |
+| Partial success (some sources failed) |         0 |
+| All attempted sources failed          |         1 |
+| Persistence failure                   |         1 |
+| Deadline left sources unstarted       |         1 |
+| `SIGINT` cancellation                 |       130 |
+| `SIGTERM` cancellation                |       143 |
+| Runtime initialization failure        |         1 |
+| Unexpected error                      |         1 |
+
+Two details that a supervisor script depends on:
+
+- **`130` and `143` are `128 + signal number`**, the shell convention, and are
+  distinguishable from the plain `1` failure.
+- **A partial success exits `0`.** The articles that were fetched are real and
+  already persisted, so a supervisor treating nonzero as "nothing usable
+  happened" would be wrong.
+
+`classifyRun` applies a fixed precedence: persistence failure first, then
+cancellation, then a deadline that left sources unstarted, then the source
+outcomes counted over **attempted** sources only. A `skipped` source was never
+tried, so it counts as neither success nor failure — that is why a deadline
+truncation is reported through `stoppedReason` rather than as a failed source.
+
+A cancellation with no recorded signal identity is classified as
+`unexpected-error` (exit `1`) rather than guessed into `130` or `143`: an invented
+signal identity would be indistinguishable from a real one.
+
+## SQLite persistence
+
+The production CLI writes through `SqliteArticleRepository`, built by
+`createRuntime()` over a handle from `openDatabase()`.
+
+- **Driver.** `node:sqlite` (`DatabaseSync`), Node's built-in SQLite binding. No
+  native add-on and no ORM is involved.
+- **Connection setup order.** The very first statement on each newly opened
+  connection is `PRAGMA busy_timeout = 5000`, before `foreign_keys`, before
+  `journal_mode = WAL`, and before migrations. Setting it later would leave those
+  statements able to fail with `SQLITE_BUSY`.
+- **`busy_timeout` is connection-level configuration.** It is not stored in the
+  database file and does not travel with it; every new connection must set it
+  again. It makes a competing writer wait up to five seconds instead of failing
+  immediately.
+- **`busy_timeout` is not a lock.** It is a retry window, not mutual exclusion. It
+  does not make concurrent writers safe. **Two ingestion processes must not run
+  concurrently against the same database file**; use the external scheduler to
+  serialize them (for example, a lock file or an orchestrator that never runs two
+  jobs at once).
+- **Persistence is not atomic per run.** `saveMany` performs sequential per-article
+  upserts, each in its own transaction. If an article fails, earlier articles
+  remain written. There is **no whole-run transaction and no rollback of a
+  partial run** — a failed run can leave some articles stored.
+
+## Docker persistence
+
+Deployment configuration lives in `compose.yaml` (the Compose default filename;
+there is no `docker-compose.yml`) and `Dockerfile`.
+
+- **Named volume:** `kou-news-data`, declared at the Compose top level and mounted
+  at `/app/data`.
+- **Container database path:** `DATABASE_PATH=/app/data/kou-news.db`, set
+  explicitly by Compose. This overrides the `.env` value; the local default
+  `./data/kou-news.db` is a development path and is not the container path.
+- **Runtime user:** the non-root `node` user (`USER node` in the runtime stage).
+- **Directory ownership:** the Dockerfile creates `/app/data` and
+  `chown node:node /app/data` **before** `USER node`, so the runtime user can
+  write there. Docker seeds a fresh named volume with that directory's ownership,
+  which is what makes the volume writable.
+- **Lifetime:** the named volume survives ordinary container replacement and
+  `docker compose down`. Only `docker compose down -v` deletes it — that flag
+  removes the SQLite database with it.
+- **Limitation:** an **existing** volume that was created with the wrong ownership
+  is not repaired automatically. Changing the `chown` in the Dockerfile affects
+  newly created volumes; a volume already populated keeps its ownership until it
+  is removed and recreated (or corrected manually).
+
+## Ingestion run control: deadline and cancellation
+
+A run is bounded in time and can be asked to stop, but neither mechanism
+interrupts work already in flight. Both are checked **at source boundaries
+only**, by `runIngestion` in `src/modules/ingestion/ingestion.service.ts`.
+
+### Deadline
+
+`deadlineMs` defaults to `DEFAULT_INGESTION_DEADLINE_MS` (300 000 ms) and is
+measured with a monotonic clock — `performance.now()` by default, injectable via
+`clock` so tests never wait. Wall-clock time is deliberately not used: an NTP
+correction or a VM resume would move a `Date.now()`-based deadline backwards or
+forwards and silently change the run's budget.
+
+Elapsed time is computed once at the start (`deadlineAt = clock() + deadlineMs`)
+and compared with `clock() >= deadlineAt` before each source begins. An invalid
+budget — zero, negative, `NaN`, or infinite — throws `RangeError` rather than
+being coerced: treating `NaN` as "unlimited" would remove the guard the caller
+asked for without saying so.
+
+Because the check happens before a fetch starts, a run can overrun its deadline
+by up to one source. That is the intended trade: aborting mid-request would
+discard a nearly finished fetch and force a re-fetch of the same source later.
+
+The 300-second budget covers the **whole run**, not each source. It is a ceiling
+on total time, so it does not guarantee that all six configured sources will be
+attempted: if their combined execution exceeds the budget, the remaining sources
+are `skipped` and the run exits `1`. Raising throughput means shortening per-source
+work or raising the budget — not expecting the deadline to make six fetches fit.
+
+### Cancellation
+
+`signal` accepts a `CancellationSignal` (`src/core/lifecycle/cancellation.ts`).
+It is a plain object created per run, not module state, so two runs in one
+process cannot cancel each other. A source already being fetched is always
+awaited to completion and its articles are kept; only _starting_ a new source is
+prevented.
+
+The signal is checked before the deadline, so a run cancelled by an operator
+reports `signal` even when the budget also expired. The two reasons are kept
+distinct because they call for different responses: an exhausted budget means the
+budget is wrong, a signal means someone asked for the stop.
+
+### Reporting a run that stopped early
+
+`SourceRunResult.status` is `'ok' | 'error' | 'skipped'`. A source that was never
+attempted is `'skipped'` with a `skipReason` of `'deadline'` or `'signal'` — never
+`'ok'`, which would claim coverage the run did not have, and never `'error'`,
+because nothing failed. `IngestionRunResult.stoppedReason` carries the same reason
+at run level and is **absent** when every enabled source was attempted, so an
+existing consumer that checks only `status` keeps working unchanged.
+
+Deduplication and `saveMany` still run over whatever was collected, and a
+persistence failure still rejects the run regardless of why it stopped.
+
+## Signal handling for ingestion
+
+`createIngestionLifecycle` (`src/core/lifecycle/ingestion-lifecycle.ts`)
+composes signal handling around one run. It is not a CLI entry point: it reads no
+arguments, maps no exit code, and is not wired into `package.json` scripts.
+
+### First and second signal
+
+| Signal                    | Behaviour                                                                                                                                                         |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| First `SIGINT`/`SIGTERM`  | Sets graceful cancellation. No new source starts. The current fetch finishes, its articles are saved, and the run returns normally. The runtime is then disposed. |
+| Second `SIGINT`/`SIGTERM` | Terminates immediately via the injected `terminate` (default `process.exit(1)`). Requested exactly once.                                                          |
+| Third and later           | Ignored. The termination request has already been made.                                                                                                           |
+
+The counter is shared across both signals: `SIGINT` followed by `SIGTERM` is
+still the second signal, not two independent sequences.
+
+The second signal is a request to stop _now_, not a promise of a tidy end. Data
+risk on that path:
+
+- A fetch still running is abandoned; its result is discarded.
+- Articles fetched but not yet passed to `saveMany` are lost.
+- A `saveMany` batch already partially applied stays partially applied — that
+  path is deliberately non-transactional, as documented on `ArticleRepository`.
+
+SQLite keeps the database _consistent_ on the next open (the WAL is recovered),
+but consistency is not completeness. Never describe a second-signal exit as a
+clean or complete shutdown.
+
+### Ordering around runtime initialization
+
+Handlers are installed **before** `createRuntime()` is called. Installing them
+afterwards leaves a window in which a signal during a slow database open
+terminates the process with a connection already acquired and never closed.
+
+Subscribing first has one consequence worth stating: initialization itself is not
+interruptible. The signal is recorded instead, and then:
+
+- If it arrived during `createRuntime()`, the runtime is still awaited to
+  completion so whatever was opened is known, then disposed, and the
+  run is **not** started — no source is fetched for a request nobody wants.
+- If it arrived after the runtime exists but before the run begins, the same
+  skip applies.
+- If `createRuntime()` throws, no runtime exists, nothing is disposed, and no
+  error is invented.
+
+Disposal happens exactly once per invocation, guarded by a flag rather than by
+the shape of a thrown value, so it runs on the clean path, on a run that throws,
+and after a cancellation. A disposal that throws is never retried — the handle's
+state is unknown afterwards and a retry could double-release — and it surfaces as
+the invocation's error instead of hiding behind a successful run.
+
 ## Configuration
 
 All runtime configuration comes from environment variables, validated at startup
@@ -246,37 +541,64 @@ process throws during startup rather than running in a partially configured
 state. The schema, defaults, and semantics are documented in `.env.example` and
 the project `README.md`.
 
-## Future database integration extension point
+Supported variables, all with defaults so an empty environment is valid:
 
-No database is implemented at Milestone 0, and no database provider has been
-selected. The intended integration point, when it is introduced, is:
+| Variable              | Default              | Meaning                                             |
+| --------------------- | -------------------- | --------------------------------------------------- |
+| `NODE_ENV`            | `development`        | `development` \| `test` \| `production`             |
+| `PORT`                | `3000`               | HTTP listen port                                    |
+| `HOST`                | `0.0.0.0`            | HTTP listen host                                    |
+| `LOG_LEVEL`           | `info`               | `debug` \| `info` \| `warn` \| `error`              |
+| `APP_TIMEZONE`        | `Asia/Taipei`        | Retained for a future scheduler; unused today       |
+| `DATABASE_PATH`       | `./data/kou-news.db` | SQLite file path, relative to the working directory |
+| `SHUTDOWN_TIMEOUT_MS` | `8000`               | HTTP drain budget, 1000–60000                       |
 
-- A dedicated persistence layer under `src/core` (for example a `db` or
-  `persistence` concern) that owns the client lifecycle.
+There is no separate variable for the ingestion CLI: it reads the same
+`DATABASE_PATH`, so the CLI and the server always agree on which file they use.
+Docker Compose overrides `DATABASE_PATH` with the in-container path; see _Docker
+persistence_.
+
+## Persistence boundary
+
+SQLite is implemented, and the shape it was built into is:
+
+- A dedicated persistence layer under `src/core/persistence/` that owns the client
+  lifecycle (`sqlite.ts`, `migrations.ts`).
 - Per-module **repositories** that encapsulate queries and are the only code that
-  touches the persistence layer. Services depend on repository interfaces, not on
-  a database client directly.
-- Readiness reporting (`GET /api/ready`) extended to include a database
-  connectivity check in its `checks` object.
+  touches the persistence layer. Services depend on the `ArticleRepository`
+  interface, not on a database client directly.
+- Readiness reporting (`GET /api/ready`) includes a database connectivity check in
+  its `checks` object — see _Liveness and readiness_.
 
-This shape keeps the ORM and provider choice behind a boundary so it can be made
-later without reshaping module code. **The provider and the ORM are deliberately
-undecided.**
+`createRuntime()` is the only place a connection is opened and the only place it is
+closed. The repository borrows the handle and never closes it. Readiness probes
+borrow it too, so probing does not open a second connection.
+
+**No ORM is in use.** The driver is `node:sqlite` behind the repository interface,
+which keeps an ORM or a different provider replaceable later without reshaping
+module code.
 
 ## Planned modules (not implemented)
 
-The following are planned for later milestones. They do **not** exist in the code
-yet, and no interfaces or adapters for them have been created:
+The following are **not** implemented. No interfaces or adapters for them exist in
+the code yet, and nothing in this repository performs them today:
 
-- **news ingestion** — fetching articles from configurable sources.
-- **article extraction** — turning raw sources into structured articles.
+- **article extraction** — turning raw feed entries into fuller article text.
+  Today the ingestion module stores what the feed provides; it does not fetch and
+  extract the article body.
 - **translation and summarization** — producing Traditional Chinese summaries,
   via a provider-agnostic LLM adapter.
-- **briefing generation** — assembling the daily briefing (timezone Asia/Taipei,
-  08:00).
+- **briefing generation** — assembling the daily briefing.
 - **notifications** — independent delivery adapters for Kou AI and the Telegram
   bot.
-- **scheduling** — triggering daily jobs.
+- **scheduling** — triggering daily jobs. Ingestion is invoked externally today;
+  there is no scheduler and no 08:00 job. `APP_TIMEZONE` is retained for this.
 
 Each is expected to become its own module following the same boundaries and
 dependency direction described above.
+
+> The service's stated goal — collecting AI news, translating and summarizing it
+> into Traditional Chinese, generating daily briefings and delivering them to Kou
+> AI and Telegram — is the destination, not the current state. What exists today
+> is the HTTP server, its health/readiness endpoints, the SQLite-backed ingestion
+> CLI, and the operational scaffolding around them.

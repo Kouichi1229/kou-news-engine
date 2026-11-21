@@ -20,7 +20,9 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "ingest": "node --env-file-if-exists=.env --import tsx src/cli/ingest.ts",
+    "ingest:prod": "node dist/cli/ingest.js"
   },
   "dependencies": {
     "express": "^5.0.0",

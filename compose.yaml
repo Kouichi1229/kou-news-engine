@@ -12,8 +12,19 @@ services:
       PORT: 3000
       LOG_LEVEL: '${LOG_LEVEL:-info}'
       APP_TIMEZONE: '${APP_TIMEZONE:-Asia/Taipei}'
+      # Absolute path inside the named volume mounted below. The default
+      # './data/kou-news.db' would resolve against WORKDIR /app and land on the
+      # same file, but only because of the working directory; this states it.
+      DATABASE_PATH: /app/data/kou-news.db
+    volumes:
+      - kou-news-data:/app/data
     restart: unless-stopped
     init: true
     # Larger than the app's default SHUTDOWN_TIMEOUT_MS (8000ms) so the
     # application can finish draining before Docker force-kills the container.
     stop_grace_period: 12s
+
+# Named volume: Docker owns the storage, so it survives container replacement
+# and `docker compose down`. Only `docker compose down -v` removes it.
+volumes:
+  kou-news-data:

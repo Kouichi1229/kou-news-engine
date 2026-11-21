@@ -139,6 +139,21 @@ export interface OpenDatabaseOptions {
 
 const MEMORY_PATH = ':memory:';
 
+/**
+ * How long SQLite waits for a locked database before reporting `SQLITE_BUSY`,
+ * in milliseconds.
+ *
+ * Fixed by design, not configurable: the value is a property of how this
+ * process competes for the file, not of any particular deployment. It is
+ * applied per connection because `busy_timeout` is a connection-level setting
+ * that SQLite does not persist in the database file.
+ *
+ * 5000ms covers a competing writer finishing a normal batch while still
+ * failing well within any caller's request budget, rather than blocking
+ * indefinitely on a stuck lock.
+ */
+const BUSY_TIMEOUT_MS = 5000;
+
 function isMemory(path: string): boolean {
   return path === MEMORY_PATH || path.startsWith('file::memory:');
 }
@@ -311,6 +326,11 @@ export function openDatabase(options: OpenDatabaseOptions = {}): SqliteDatabase 
     }
 
     db = new DatabaseSync(absolutePath);
+
+    // First statement on the connection: a lock conflict must wait from the
+    // very start, including for the pragmas and migrations below. Setting it
+    // later would leave those statements able to fail with SQLITE_BUSY.
+    db.exec(`PRAGMA busy_timeout = ${String(BUSY_TIMEOUT_MS)}`);
 
     // Referential integrity is off by default in SQLite and must be enabled per
     // connection, otherwise the article_sources foreign key is decorative.
