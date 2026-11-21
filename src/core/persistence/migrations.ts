@@ -207,10 +207,105 @@ export const PROVENANCE_IDENTITY_AND_SOURCE_ORDER_MIGRATION: Migration = {
   ],
 };
 
+/**
+ * v4: article extraction state.
+ *
+ * One row per article, created lazily by `SEED` rather than backfilled, so this
+ * migration stays a pure schema change.
+ *
+ * ## Why the CHECK constraints are this dense
+ *
+ * The four states are mutually exclusive and each has a complete field matrix.
+ * Expressing that as one disjunction makes every illegal combination
+ * unrepresentable, which is what lets the service treat a successful write as
+ * proof that the row is coherent. Anything the schema cannot express — fencing,
+ * lease expiry, "the request was never issued" — stays in the service and is
+ * documented there rather than pretended to be a constraint.
+ *
+ * Two classes of constraint here are easy to get wrong and are deliberate:
+ *
+ * - `typeof(...) = 'integer'`. SQLite's INTEGER affinity does **not** coerce
+ *   `1.5`: it stores REAL and `BETWEEN 0 AND 3` accepts it. Without the
+ *   `typeof` guard `attempts = 1.5` would pass.
+ * - `instr(content_text, char(0)) = 0`. SQLite's `length()` stops counting at
+ *   the first NUL, so a body containing one would satisfy
+ *   `content_length = length(content_text)` with a length that is too small.
+ *   The normaliser removes NUL; this is the backstop.
+ *
+ * `empty` records `extracted_at`: it is a completed extraction that found
+ * nothing, not an attempt that did not finish.
+ */
+export const ARTICLE_CONTENTS_MIGRATION: Migration = {
+  version: 4,
+  name: 'article_contents',
+  statements: [
+    `CREATE TABLE article_contents (
+      article_id        TEXT    PRIMARY KEY NOT NULL
+                                REFERENCES articles (id) ON DELETE CASCADE,
+      status            TEXT    NOT NULL
+                                CHECK (status IN ('extracted','empty','failed','in_progress')),
+
+      content_text      TEXT        NULL,
+      content_length    INTEGER NOT NULL DEFAULT 0,
+      extracted_at      TEXT        NULL,
+      final_url         TEXT        NULL,
+      extractor_version TEXT    NOT NULL,
+      failure_code      TEXT        NULL,
+      http_status       INTEGER     NULL,
+
+      attempts          INTEGER NOT NULL DEFAULT 0,
+      lease_owner       TEXT        NULL,
+      lease_token       TEXT        NULL,
+      lease_expires_at  INTEGER     NULL,
+
+      CHECK (typeof(attempts) = 'integer'),
+      CHECK (http_status IS NULL OR typeof(http_status) = 'integer'),
+      CHECK (lease_expires_at IS NULL OR typeof(lease_expires_at) = 'integer'),
+      CHECK (typeof(content_length) = 'integer'),
+      CHECK (attempts BETWEEN 0 AND 3),
+      CHECK (content_text IS NULL OR instr(content_text, char(0)) = 0),
+
+      CHECK (
+        (status = 'in_progress'
+          AND content_text IS NULL AND content_length = 0
+          AND extracted_at IS NULL AND final_url IS NULL
+          AND failure_code IS 'PENDING' AND http_status IS NULL
+          AND lease_owner IS NOT NULL AND lease_token IS NOT NULL
+          AND lease_expires_at IS NOT NULL)
+     OR (status = 'extracted'
+          AND content_text IS NOT NULL AND content_length > 0
+          AND content_length = length(content_text)
+          AND extracted_at IS NOT NULL AND final_url IS NOT NULL
+          AND failure_code IS NULL
+          AND http_status IS NOT NULL AND http_status BETWEEN 200 AND 299
+          AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+     OR (status = 'empty'
+          AND content_text IS NULL AND content_length = 0
+          AND extracted_at IS NOT NULL AND final_url IS NOT NULL
+          AND failure_code IS NOT NULL
+          AND failure_code IN ('NO_CONTENT','CONTENT_TOO_SHORT')
+          AND http_status IS NOT NULL AND http_status BETWEEN 200 AND 299
+          AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+     OR (status = 'failed'
+          AND content_text IS NULL AND content_length = 0
+          AND extracted_at IS NULL AND final_url IS NULL
+          AND failure_code IS NOT NULL
+          AND failure_code NOT IN ('NO_CONTENT','CONTENT_TOO_SHORT')
+          AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+      )
+    )`,
+    `CREATE UNIQUE INDEX idx_article_contents_lease_token
+       ON article_contents (lease_token) WHERE lease_token IS NOT NULL`,
+    `CREATE INDEX idx_article_contents_claimable
+       ON article_contents (status, extractor_version, attempts)`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   INITIAL_MIGRATION,
   INSERTION_ORDER_AND_PRIMARY_SOURCE_MIGRATION,
   PROVENANCE_IDENTITY_AND_SOURCE_ORDER_MIGRATION,
+  ARTICLE_CONTENTS_MIGRATION,
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {

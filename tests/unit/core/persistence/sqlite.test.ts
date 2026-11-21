@@ -351,7 +351,12 @@ describe('runMigrations — first run', () => {
 
     runMigrations(db);
 
-    expect(tableNames(db)).toEqual(['article_sources', 'articles', 'schema_migrations']);
+    expect(tableNames(db)).toEqual([
+      'article_contents',
+      'article_sources',
+      'articles',
+      'schema_migrations',
+    ]);
     db.close();
   });
 
@@ -361,6 +366,8 @@ describe('runMigrations — first run', () => {
     runMigrations(db);
 
     expect(indexNames(db)).toEqual([
+      'idx_article_contents_claimable',
+      'idx_article_contents_lease_token',
       'idx_article_sources_identity',
       'idx_article_sources_order',
       'idx_article_sources_primary',
