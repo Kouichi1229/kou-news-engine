@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import express from 'express';
@@ -10,13 +10,42 @@ import {
   openDatabase,
   type SqliteDatabase,
 } from '../../src/core/persistence/sqlite.js';
-import { createRuntime, disposeRuntimeAfterFailure, type Runtime } from '../../src/runtime.js';
+import {
+  createRuntime,
+  disposeRuntimeAfterFailure,
+  RuntimeDisposedError,
+  type Runtime,
+} from '../../src/runtime.js';
+import { LlmError, LlmTimeoutError } from '../../src/core/llm/llm.errors.js';
+import type { LlmProvider } from '../../src/core/llm/llm.provider.js';
+import type { LlmProviderConfig, LlmProviderDeps } from '../../src/core/llm/provider.factory.js';
+import { createProvider as createProviderFromFactory } from '../../src/core/llm/provider.factory.js';
 import type { Article } from '../../src/types/article.js';
 
 /** A fresh in-memory database, so no test touches the repository's `data/`. */
 function memoryDatabase(): SqliteDatabase {
   return openDatabase({ path: ':memory:' });
 }
+
+/**
+ * Counts how many times the Gemini transport module is loaded.
+ *
+ * `vi.mock` replaces the module with a factory that runs only when something
+ * imports it, which is exactly the "module registry" observation T-11e assertion 3
+ * needs in an ES module graph (there is no public registry to inspect). The counter
+ * is falsifiable: the T-11e test loads the module on purpose at the end and watches
+ * the count rise.
+ */
+const transportModuleLoads = vi.hoisted(() => ({ count: 0 }));
+
+vi.mock('../../src/core/llm/providers/gemini.transport.js', () => {
+  transportModuleLoads.count += 1;
+  return {
+    createGeminiTransport: () => {
+      throw new Error('the transport must not be constructed in this test file');
+    },
+  };
+});
 
 /**
  * Disposes every runtime, continuing past failures.
@@ -546,5 +575,495 @@ describe('createRuntime — request tracker ownership', () => {
     ).toThrow(original);
 
     expect(database.isOpen).toBe(false);
+  });
+});
+
+/**
+ * A provider stub.
+ *
+ * Only `complete()` could ever be exercised, and no M4.4 test calls it: the tests
+ * assert identity and settlement, not generation. It throws so a test that
+ * accidentally generates fails loudly instead of passing on a silent stub.
+ */
+function stubProvider(id: string): LlmProvider {
+  return {
+    id,
+    model: { name: 'stub-model', vendorModelId: 'stub-vendor-model' },
+    complete: () => {
+      throw new Error(`stub provider ${id} must not be asked to complete`);
+    },
+  };
+}
+
+/** Deterministic `LlmProviderConfig`, so no test reads or mutates `process.env`. */
+const STUB_LLM_CONFIG: LlmProviderConfig = {
+  provider: 'fake',
+  model: 'stub-model',
+  timeoutMs: 1000,
+  apiKey: undefined,
+};
+
+/**
+ * A promise whose settlement the test controls.
+ *
+ * Deferreds are the only synchronisation these tests use: every ordering they
+ * assert is a synchronous decision point, so a sleep would replace the property
+ * under test with a timing assumption (§9.0b T-22).
+ */
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/**
+ * Records how often the provider factory ran and hands back a deferred attempt.
+ *
+ * The count is the observable proof of sharing: one call means one initialisation,
+ * and it is read without touching any private cell state.
+ */
+function deferredFactory(): {
+  createProvider: () => Promise<LlmProvider>;
+  calls: () => number;
+  attempt: Deferred<LlmProvider>;
+} {
+  let calls = 0;
+  const attempt = deferred<LlmProvider>();
+  return {
+    createProvider: () => {
+      calls += 1;
+      return attempt.promise;
+    },
+    calls: () => calls,
+    attempt,
+  };
+}
+
+/** Flushes pending microtasks so a wrapper's arbitration has run. */
+function flushMicrotasks(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
+/**
+ * Observes a promise without leaving a window in which its rejection is unhandled.
+ *
+ * A caller that holds a wrapper across an `await` before attaching a handler would
+ * create a real unhandled rejection. Attaching both branches here, synchronously,
+ * keeps every test honest about the property it is asserting.
+ */
+type Outcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
+function capture<T>(promise: Promise<T>): Promise<Outcome<T>> {
+  return promise.then(
+    (value): Outcome<T> => ({ ok: true, value }),
+    (error: unknown): Outcome<T> => ({ ok: false, error }),
+  );
+}
+
+describe('createRuntime — lazy provider initialisation (T-20..T-23)', () => {
+  const runtimes: Runtime[] = [];
+
+  function build(deps: {
+    createProvider: () => Promise<LlmProvider>;
+    llmConfig?: LlmProviderConfig;
+  }): Runtime {
+    const runtime = createRuntime({
+      openDatabase: () => memoryDatabase(),
+      llmConfig: deps.llmConfig ?? STUB_LLM_CONFIG,
+      createProvider: deps.createProvider,
+    });
+    runtimes.push(runtime);
+    return runtime;
+  }
+
+  afterEach(async () => {
+    await disposeRuntimes(runtimes.splice(0, runtimes.length));
+  });
+
+  it('T-20: concurrent calls share one initialisation and one provider, but not one promise', async () => {
+    const factory = deferredFactory();
+    const runtime = build({ createProvider: factory.createProvider });
+    const provider = stubProvider('shared');
+
+    // Three calls in the same tick: two would be enough, the third proves the
+    // sharing survives more than a single pair.
+    const promiseA = runtime.getProvider();
+    const promiseB = runtime.getProvider();
+    const promiseC = runtime.getProvider();
+
+    // Distinct caller-facing promises over one shared attempt.
+    expect(promiseA).not.toBe(promiseB);
+    expect(promiseB).not.toBe(promiseC);
+    expect(promiseA).not.toBe(promiseC);
+
+    // Exactly one construction started, and it started before any settlement.
+    expect(factory.calls()).toBe(1);
+
+    factory.attempt.resolve(provider);
+
+    await expect(promiseA).resolves.toBe(provider);
+    await expect(promiseB).resolves.toBe(provider);
+    await expect(promiseC).resolves.toBe(provider);
+
+    // No second initialisation, including for a call made after success.
+    const later = await runtime.getProvider();
+    expect(later).toBe(provider);
+    expect(factory.calls()).toBe(1);
+  });
+
+  it('T-20: a later call receives its own promise even when the provider is already ready', async () => {
+    const factory = deferredFactory();
+    const runtime = build({ createProvider: factory.createProvider });
+    const provider = stubProvider('ready');
+
+    const first = runtime.getProvider();
+    factory.attempt.resolve(provider);
+    await first;
+
+    const second = runtime.getProvider();
+    const third = runtime.getProvider();
+
+    expect(second).not.toBe(third);
+    await expect(second).resolves.toBe(provider);
+    await expect(third).resolves.toBe(provider);
+    expect(factory.calls()).toBe(1);
+  });
+
+  it('T-21: a failed initialisation is not cached, so a later call retries and succeeds', async () => {
+    const initialisationError = new LlmTimeoutError('first attempt timed out');
+    const provider = stubProvider('retried');
+    let calls = 0;
+
+    const runtime = build({
+      createProvider: () => {
+        calls += 1;
+        return calls === 1 ? Promise.reject(initialisationError) : Promise.resolve(provider);
+      },
+    });
+
+    await expect(runtime.getProvider()).rejects.toBe(initialisationError);
+    expect(calls).toBe(1);
+
+    // A fresh attempt, not a replayed rejection.
+    await expect(runtime.getProvider()).resolves.toBe(provider);
+    expect(calls).toBe(2);
+
+    // The provider is now published, so further calls neither retry nor rebuild.
+    await expect(runtime.getProvider()).resolves.toBe(provider);
+    expect(calls).toBe(2);
+  });
+
+  it('T-22 case A: disposal does not await a pending initialisation and stays disposed', async () => {
+    const factory = deferredFactory();
+    const runtime = build({ createProvider: factory.createProvider });
+
+    void runtime.getProvider().catch(() => undefined);
+
+    // Settles without the attempt ever settling: the deferred is still pending.
+    await expect(runtime.dispose()).resolves.toBeUndefined();
+
+    // Late success is discarded: it cannot resurrect the cell or publish a provider.
+    factory.attempt.resolve(stubProvider('late-success'));
+    await flushMicrotasks();
+    await expect(runtime.getProvider()).rejects.toBeInstanceOf(RuntimeDisposedError);
+    expect(factory.calls()).toBe(1);
+  });
+
+  it('T-22 case A: a late rejection after disposal neither resurrects nor escapes', async () => {
+    const factory = deferredFactory();
+    const runtime = build({ createProvider: factory.createProvider });
+
+    void runtime.getProvider().catch(() => undefined);
+    await runtime.dispose();
+
+    // Rejecting after disposal must not produce an unhandled rejection. If it did,
+    // the process-level handler installed by the test runner would fail this test.
+    factory.attempt.reject(new LlmTimeoutError('late failure'));
+    await flushMicrotasks();
+
+    await expect(runtime.getProvider()).rejects.toBeInstanceOf(RuntimeDisposedError);
+  });
+
+  it('T-22 case B: a retained wrapper rejects with the disposed error when disposal wins', async () => {
+    const factory = deferredFactory();
+    const runtime = build({ createProvider: factory.createProvider });
+
+    // Retained: this is the promise the caller is waiting on. Observed from the
+    // moment it is created, so its rejection is never unhandled.
+    const retained = capture(runtime.getProvider());
+    expect(factory.calls()).toBe(1);
+
+    await runtime.dispose();
+
+    const outcome = await retained;
+    expect(outcome.ok).toBe(false);
+    const error = (outcome as { ok: false; error: unknown }).error;
+    expect(error).toBeInstanceOf(RuntimeDisposedError);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(LlmError);
+    expect((error as RuntimeDisposedError).kind).toBe('disposed');
+    expect((error as RuntimeDisposedError).name).toBe('RuntimeDisposedError');
+
+    // Late success must not reach the superseded caller.
+    factory.attempt.resolve(stubProvider('superseded'));
+    await flushMicrotasks();
+    expect((await retained).ok).toBe(false);
+  });
+
+  it('T-22 case B: a late rejection cannot override the disposal result', async () => {
+    const factory = deferredFactory();
+    const runtime = build({ createProvider: factory.createProvider });
+
+    const retained = capture(runtime.getProvider());
+    await runtime.dispose();
+
+    factory.attempt.reject(new LlmTimeoutError('late failure'));
+    await flushMicrotasks();
+
+    const outcome = await retained;
+    expect(outcome.ok).toBe(false);
+    const error = (outcome as { ok: false; error: unknown }).error;
+    expect(error).toBeInstanceOf(RuntimeDisposedError);
+    expect(error).not.toBeInstanceOf(LlmError);
+  });
+
+  it('T-23: calls after disposal reject with the disposed error and start nothing', async () => {
+    const factory = deferredFactory();
+    const runtime = build({ createProvider: factory.createProvider });
+
+    await runtime.dispose();
+    const callsBefore = factory.calls();
+
+    // Captured eagerly so neither rejection is briefly unhandled.
+    const first = capture(runtime.getProvider());
+    const second = capture(runtime.getProvider());
+
+    const outcomes = await Promise.all([first, second]);
+    const firstError = (outcomes[0] as { ok: false; error: unknown }).error;
+    const secondError = (outcomes[1] as { ok: false; error: unknown }).error;
+
+    for (const outcome of outcomes) {
+      expect(outcome.ok).toBe(false);
+      const error = (outcome as { ok: false; error: unknown }).error;
+      expect(error).toBeInstanceOf(RuntimeDisposedError);
+      expect(error).not.toBeInstanceOf(LlmError);
+      expect((error as RuntimeDisposedError).kind).toBe('disposed');
+    }
+
+    // A freshly created error per call, not one shared rejection value.
+    expect(firstError).not.toBe(secondError);
+
+    // No initialisation began, and no provider is reachable.
+    expect(factory.calls()).toBe(callsBefore);
+    expect(factory.calls()).toBe(0);
+  });
+
+  it('T-23: a disposed runtime that had reached ready still hands out nothing', async () => {
+    const factory = deferredFactory();
+    const runtime = build({ createProvider: factory.createProvider });
+    const provider = stubProvider('ready-then-disposed');
+
+    const first = runtime.getProvider();
+    factory.attempt.resolve(provider);
+    await expect(first).resolves.toBe(provider);
+
+    await runtime.dispose();
+
+    // The ready-state fast path checks disposal first, so the stored provider is
+    // not reachable through a disposed runtime.
+    await expect(runtime.getProvider()).rejects.toBeInstanceOf(RuntimeDisposedError);
+    expect(factory.calls()).toBe(1);
+  });
+});
+
+describe('createRuntime — wrapper settlement ordering', () => {
+  const runtimes: Runtime[] = [];
+
+  function build(createProvider: () => Promise<LlmProvider>): Runtime {
+    const runtime = createRuntime({
+      openDatabase: () => memoryDatabase(),
+      llmConfig: STUB_LLM_CONFIG,
+      createProvider,
+    });
+    runtimes.push(runtime);
+    return runtime;
+  }
+
+  afterEach(async () => {
+    await disposeRuntimes(runtimes.splice(0, runtimes.length));
+  });
+
+  it('case A: an attempt that fulfils before a same-tick disposal still loses to disposal', async () => {
+    const factory = deferredFactory();
+    const runtime = build(factory.createProvider);
+    const provider = stubProvider('fulfilled-then-disposed');
+
+    const wrapper = capture(runtime.getProvider());
+    // Fulfils the attempt, then disposes synchronously — before the attempt's
+    // reaction has had a chance to run and commit a provider.
+    factory.attempt.resolve(provider);
+    await runtime.dispose();
+
+    const outcome = await wrapper;
+    expect(outcome.ok).toBe(false);
+    expect((outcome as { ok: false; error: unknown }).error).toBeInstanceOf(RuntimeDisposedError);
+  });
+
+  it('case B: a wrapper that committed the provider keeps it when disposal follows', async () => {
+    const factory = deferredFactory();
+    const runtime = build(factory.createProvider);
+    const provider = stubProvider('committed-first');
+
+    const wrapper = runtime.getProvider();
+    factory.attempt.resolve(provider);
+
+    // Let arbitration commit `resolve(provider)` before disposal begins.
+    await expect(wrapper).resolves.toBe(provider);
+
+    await runtime.dispose();
+
+    // Non-revocation: a delivered provider is not retracted by later disposal.
+    await expect(wrapper).resolves.toBe(provider);
+  });
+
+  it('case C: an attempt that rejects before a same-tick disposal loses to disposal', async () => {
+    const factory = deferredFactory();
+    const runtime = build(factory.createProvider);
+
+    const wrapper = capture(runtime.getProvider());
+    factory.attempt.reject(new LlmTimeoutError('rejected-then-disposed'));
+    await runtime.dispose();
+
+    const outcome = await wrapper;
+    expect(outcome.ok).toBe(false);
+    const error = (outcome as { ok: false; error: unknown }).error;
+    expect(error).toBeInstanceOf(RuntimeDisposedError);
+    expect(error).not.toBeInstanceOf(LlmError);
+  });
+
+  it('case D: a wrapper that committed the initialisation error keeps that error', async () => {
+    const initialisationError = new LlmTimeoutError('committed-first');
+    const factory = deferredFactory();
+    const runtime = build(factory.createProvider);
+
+    const wrapper = runtime.getProvider();
+    factory.attempt.reject(initialisationError);
+
+    // Arbitration commits the initialisation error before disposal begins.
+    await expect(wrapper).rejects.toBe(initialisationError);
+
+    await runtime.dispose();
+
+    await expect(wrapper).rejects.toBe(initialisationError);
+  });
+
+  it('settles each wrapper at most once under repeated disposal', async () => {
+    const factory = deferredFactory();
+    const runtime = build(factory.createProvider);
+
+    const wrapper = runtime.getProvider();
+
+    // Repeated disposal is idempotent and must not settle the wrapper twice.
+    await Promise.all([runtime.dispose(), runtime.dispose(), runtime.dispose()]);
+
+    await expect(wrapper).rejects.toBeInstanceOf(RuntimeDisposedError);
+  });
+});
+
+describe('createRuntime — no eager Gemini initialisation (T-11e)', () => {
+  const runtimes: Runtime[] = [];
+
+  function build(deps: {
+    createProvider: (
+      config: LlmProviderConfig,
+      providerDeps: LlmProviderDeps,
+    ) => Promise<LlmProvider>;
+    llmConfig?: LlmProviderConfig;
+  }): Runtime {
+    const runtime = createRuntime({
+      openDatabase: () => memoryDatabase(),
+      llmConfig: deps.llmConfig ?? { ...STUB_LLM_CONFIG, apiKey: undefined },
+      createProvider: deps.createProvider,
+    });
+    runtimes.push(runtime);
+    return runtime;
+  }
+
+  afterEach(async () => {
+    await disposeRuntimes(runtimes.splice(0, runtimes.length));
+  });
+
+  it('T-11e: createRuntime builds no provider, loads no transport, and never calls the seam', async () => {
+    let providerCalls = 0;
+    const loadsBefore = transportModuleLoads.count;
+
+    // Assertion 1: a missing GEMINI_API_KEY must not fail startup.
+    const runtime = build({
+      llmConfig: { ...STUB_LLM_CONFIG, provider: 'gemini', apiKey: undefined },
+      createProvider: () => {
+        providerCalls += 1;
+        return Promise.resolve(stubProvider('eager'));
+      },
+    });
+
+    // Assertion 2: nothing was constructed during createRuntime().
+    expect(providerCalls).toBe(0);
+
+    // Assertion 3: the transport module was not loaded at startup.
+    expect(transportModuleLoads.count).toBe(loadsBefore);
+
+    // The provider is only built on demand.
+    const provider = await runtime.getProvider();
+    expect(provider.id).toBe('eager');
+    expect(providerCalls).toBe(1);
+
+    // Still not loaded: an injected factory never reaches the lazy callback.
+    expect(transportModuleLoads.count).toBe(loadsBefore);
+
+    // Control: the counter is falsifiable, not inert. Loading the module raises it.
+    await import('../../src/core/llm/providers/gemini.transport.js');
+    expect(transportModuleLoads.count).toBe(loadsBefore + 1);
+  });
+
+  it('T-11e: the real factory rejects a missing key before the transport callback runs', async () => {
+    // Assertion 4, made falsifiable: the real factory is used, so the ordering
+    // between credential validation (stage 4) and transport resolution (stage 6)
+    // is actually exercised. A seam that counted its invocations must stay at 0,
+    // and the module must stay unloaded.
+    const loadsBefore = transportModuleLoads.count;
+    const runtime = build({
+      llmConfig: { ...STUB_LLM_CONFIG, provider: 'gemini', apiKey: undefined },
+      createProvider: createProviderFromFactory,
+    });
+
+    // Assertion 2 again, now against the production factory.
+    expect(transportModuleLoads.count).toBe(loadsBefore);
+
+    await expect(runtime.getProvider()).rejects.toThrow(/GEMINI_API_KEY/);
+
+    // The key was rejected before the transport was ever resolved or loaded.
+    expect(transportModuleLoads.count).toBe(loadsBefore);
+  });
+
+  it('T-11e: assertion 5 is a forward-looking guard, not evidence', () => {
+    // No vendor SDK is installed, so "no SDK loaded" cannot fail today. This test
+    // records the dependency state that makes assertion 5 vacuous, so the claim
+    // stays honest rather than being cited as proof of lazy loading.
+    const dependencies = Object.keys(
+      JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')).dependencies ?? {},
+    );
+    expect(dependencies).not.toContain('@google/generative-ai');
   });
 });

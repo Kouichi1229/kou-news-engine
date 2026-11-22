@@ -30,6 +30,11 @@ describe('loadEnv', () => {
       APP_TIMEZONE: 'Asia/Tokyo',
       DATABASE_PATH: '/var/lib/kou-news/test.db',
       SHUTDOWN_TIMEOUT_MS: 8000,
+      LLM_PROVIDER: 'fake',
+      LLM_MODEL: 'default',
+      LLM_TIMEOUT_MS: 30000,
+      LLM_MAX_OUTPUT_TOKENS: 2048,
+      GEMINI_API_KEY: undefined,
     });
   });
 
@@ -44,6 +49,11 @@ describe('loadEnv', () => {
       APP_TIMEZONE: DEFAULT_TIMEZONE,
       DATABASE_PATH: DEFAULT_DATABASE_PATH,
       SHUTDOWN_TIMEOUT_MS: 8000,
+      LLM_PROVIDER: 'fake',
+      LLM_MODEL: 'default',
+      LLM_TIMEOUT_MS: 30000,
+      LLM_MAX_OUTPUT_TOKENS: 2048,
+      GEMINI_API_KEY: undefined,
     });
   });
 

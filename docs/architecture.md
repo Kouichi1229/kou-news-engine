@@ -61,6 +61,14 @@ src/
     persistence/
       sqlite.ts         SQLite handle, connection pragmas, transaction helper
       migrations.ts     Versioned schema migrations
+    llm/            LLM provider abstraction (I7-1b)
+      llm.types.ts      Request, response, usage and model-identity types
+      llm.errors.ts     LlmError taxonomy and the retryability table
+      llm.provider.ts   The LlmProvider interface
+      fake.provider.ts  In-process fake provider; never reaches a network
+      provider.factory.ts  createProvider(): selects an adapter, no model table
+      providers/
+        gemini.transport.ts  GeminiTransport interface + node:https implementation
   modules/
     health/         Health and readiness module
       health.routes.ts
@@ -634,6 +642,34 @@ borrow it too, so probing does not open a second connection.
 **No ORM is in use.** The driver is `node:sqlite` behind the repository interface,
 which keeps an ORM or a different provider replaceable later without reshaping
 module code.
+
+## LLM provider boundary (I7-1b)
+
+`src/core/llm/` holds a vendor-free provider abstraction. Business code depends on
+the `LlmProvider` interface and the logical model name it was constructed with; it
+never names a vendor, an SDK or a transport.
+
+- **`createProvider(config, deps)`** is the only place an adapter is selected. It
+  validates the provider name, then the credential for that provider, then the
+  transport seam — in that order, so a missing credential cannot resolve a
+  transport. It holds no model table: mapping a logical name to a vendor id is the
+  adapter's own private concern.
+- **The credential is validated here, not at startup.** `GEMINI_API_KEY` is
+  optional in the env schema, so the server and both CLIs boot without it. Only a
+  `LLM_PROVIDER=gemini` factory call can fail on a missing key.
+- **`fake` is the default and needs no secret.** It is a first-class provider, not
+  a test double bolted on: callers are tested against the same interface the real
+  adapter will implement.
+- **The transport is a seam, not a setting.** `LlmProviderDeps.createTransport`
+  returns a `GeminiTransport`; `LlmProviderConfig` has no transport field, so no
+  caller can smuggle one through configuration. The factory invokes the callback
+  only on the `gemini` branch, and the composition root supplies it. Real socket
+  I/O is confined to `providers/gemini.transport.ts`, which implements the
+  interface over `node:https`.
+- **No provider is built at startup.** `createRuntime()` builds none; the first
+  `Runtime.getProvider()` call does. `getProvider()` is exposed but not called by
+  any production path yet, so nothing constructs a provider in production — the
+  seam is in place for the milestone that adds translation and summarisation.
 
 ## Planned modules (not implemented)
 
