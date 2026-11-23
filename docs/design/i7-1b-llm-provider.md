@@ -1707,6 +1707,16 @@ are kept separate, because collapsing them makes rule B1g unsatisfiable:
   specifier for a non-expanded edge), and `source location` is the `line:column` of the
   declaration in the originating file. Two edges are the same edge only when all four
   components match.
+
+  **Both components of a source location are 1-based.** Line 1 is the file's first
+  line and column 1 is a line's first character, so the first character of a file is
+  `1:1`. This is a normative choice, not an incidental one: the TypeScript Compiler
+  API's `getLineAndCharacterOfPosition` returns **0-based** values, so an
+  implementation must add one to each component before recording or comparing a
+  location. A report that emitted the API's raw values would place the same edge at
+  `line − 1 : column − 1` and would disagree with every location cited in this
+  document. Source locations are compared as the recorded 1-based pair; no component
+  is ever recorded 0-based.
 - **Traversal deduplication** is keyed on module identity alone: a module's edges are
   expanded once, when the module is first analysed.
 
@@ -1721,6 +1731,7 @@ because their endpoints match:
 | A static import and a literal dynamic import of the same module | One `static-import` edge and one `dynamic-import` edge (rule B4) |
 | An `import` and an `export … from` of the same module           | One `static-import` edge and one `re-export` edge (rule B3)      |
 | A type-only import and a value import of the same module        | One `type-only` edge, excluded (rule B2), and one traversed edge |
+| A declaration mixing value and type bindings                    | Two edges, same location: `static-import` + `type-only`          |
 
 The dispositions differ per edge, which is precisely why they cannot share a report
 row: a single target can be simultaneously `followed` on one edge and `excluded:
@@ -1729,6 +1740,50 @@ type-only` on another, and rule B1g requires each to appear.
 Rule B1g therefore reads: every **syntactic edge** from an analysed origin appears in
 the report as followed or excluded. "Reported once" means once per syntactic edge, not
 once per endpoint pair.
+
+**A declaration that mixes value and type bindings yields two edges, split by binding
+kind.** TypeScript permits one import declaration to carry both kinds, with the type
+bindings marked individually:
+
+```ts
+import { createProvider as createProviderFromFactory, type LlmProviderConfig } from './provider.factory.js';
+```
+
+The edge identity of §9.5.3.3a is keyed on `edge kind`, and this declaration has
+bindings of both kinds, so it cannot be represented as a single edge without losing the
+distinction rule B2 depends on. It is therefore reported as **two** edges:
+
+- one `static-import` edge, carrying the declaration's source location and the value
+  bindings, which is followed under B1;
+- one `type-only` edge, carrying the **same** source location and the type bindings,
+  which is recorded as excluded under B2.
+
+The two edges are distinguished by `edge kind`, which is the second component of the
+identity tuple; they are **not** distinguished by location, and sharing a location does
+not merge them. This is the only case in which two edges of one origin legitimately
+carry an identical source location, and the identity tuple remains well-formed because
+the kinds differ.
+
+Three consequences follow, and each is normative:
+
+- **The split is by binding, not by declaration.** A declaration whose bindings are all
+  value-level yields one `static-import` edge; one whose bindings are all type-level
+  yields one `type-only` edge. Only a mixed declaration yields two.
+- **A mixed declaration's target is traversed once.** B1 follows the value edge, and
+  module deduplication by identity (§9.5.3.3a) means the `type-only` edge never causes a
+  second expansion. The target is traversed because of the value bindings, not because
+  of the type ones.
+- **The allow-list obligation is decided by the value edge alone.** B6a is decided per
+  specifier across all occurrences (§9.5.3.3a): a specifier that occurs anywhere on a
+  non-type-only edge must be listed, and this includes a specifier carried by a mixed
+  declaration, because that declaration contributes a value edge. A specifier that
+  occurs only on `type-only` edges is exempt under B6a. The split changes neither
+  outcome: the mixed declaration's value edge obliges a listing, and its `type-only`
+  edge stays excluded with reason `type-only` whether or not the specifier is listed.
+
+A scanner that emits one edge per declaration satisfies neither P10 nor N19 for a
+mixed declaration: it would report the value import and silently drop the type
+bindings, or vice versa. The edge count for a mixed declaration is exactly two.
 
 **Callback-local references are not module-level imports.** A callback's lexical
 reference to an imported binding is a distinct edge whose origin is the callback unit,
@@ -1799,7 +1854,7 @@ already observed, which is exactly the dilution above. The algorithm is:
 | B1a | **Begin at the three module-level roots** and the nested callback unit of root 1, and nothing else.                                                                                                           |
 | B1b | **Inspect each candidate edge before following it** and decide whether it participates in the bounded production transport-wiring path, using the participation test below.                                   |
 | B1c | **Follow and recursively expand only in-scope edges**, to a fixpoint.                                                                                                                                         |
-| B1d | **Record each excluded edge** with its origin, edge kind, source location, resolved target, and the exclusion reason.                                                                                         |
+| B1d | **Record each excluded edge** with its origin, edge kind, source location, resolved target, and the exclusion reason, the last drawn from the closed enumeration of §11.5.4 B.                                |
 | B1e | **Do not expand an excluded target and do not traverse its dependency subgraph.** An excluded module's own imports are never scanned.                                                                         |
 | B1f | **A bare specifier found only inside an excluded module does not enter the part B allow-list decision.** A bare specifier in an analysed module remains subject to the closed allow-list (B6).                |
 | B1g | **No syntactic edge is silently discarded.** Every syntactic edge from an analysed origin appears in the report exactly once, with its own kind and its own disposition. Silence is not an available outcome. |
@@ -1833,6 +1888,30 @@ recorded as excluded.
 edges, and edges failing the participation test are recorded without traversal.
 Recorded-but-not-expanded is a distinct outcome from "absent": the report must show
 the edge and its reason.
+
+**`fake.provider.ts` is a part B closure member.** `provider.factory.ts` value-imports
+`FakeProvider` from `./fake.provider.js`, and rule B1 follows value-level edges from
+root 2 to a fixpoint, so `src/core/llm/fake.provider.ts` enters the part B closure and
+must appear in the closure evidence. Three points follow, and none of them widens the
+analysis:
+
+- **`FakeProvider` is not a Gemini transport.** It is a provider implementation used on
+  the `fake` branch, not a `GeminiTransport`, and its construction is **not** a
+  `createGeminiTransport` construction site under the definition in §9.5.3.3b. It
+  therefore neither satisfies nor violates condition 11 of §11.5.4 D.
+- **The `fake` branch is classified by the existing participation test**, not by a new
+  rule. The `if (config.provider === 'fake')` branch of `createProvider` is reachable
+  from root 2 and is part of the analysed module, so its edges are reported; the branch
+  is not transport wiring and its construction is recorded as such rather than as a
+  second egress.
+- **It must not be silently omitted.** `fake.provider.ts` is analysed once, like any
+  other closure member, and its own value-level edge to `llm.errors.ts` is reported. A
+  report that never mentions `fake.provider.ts` has missed a closure member, and that
+  omission is a defect in the scan rather than an absence of evidence.
+
+The part B roots are unchanged by this paragraph: `runtime.ts`, `provider.factory.ts`
+and `gemini.transport.ts`, plus the nested callback unit. `fake.provider.ts` is reached
+from root 2, not added as a root.
 
 **How the transport value is traced — end to end.** The scan follows the value, not
 the text. Finding a construction site and a callback return independently is
@@ -2066,6 +2145,46 @@ states what the scanner must account for.
 | C4  | The **value-level dependencies of those helpers**, transitively, subject to the participation test               |
 | C5  | Any **additional local module required to establish the transport value flow** of §9.5.3.3a                      |
 
+**The reference set is defined over identifiers and bindings in the callback body.**
+The unit's reference set is the set of identifiers the callback function body mentions,
+resolved through ordinary lexical scoping. A local binding the body references is
+resolved to its declaration, and the unit's dependency on that binding is recorded — but
+the declaration's **initialiser is not recursively expanded** merely because the body
+mentions the binding. The three obligations keep their existing scopes and none is
+widened by this paragraph: C2 governs *imported* bindings, which are still resolved to
+their declaring module and followed under §9.5.3.3a; C3 and C4 govern *helpers the
+callback invokes* and their value-level dependencies, which are still followed
+transitively. What is added here is only that a non-helper local `const` in an enclosing
+scope is not a traversal root of its own.
+
+The production callback makes this boundary load-bearing. Its body references
+`llmConfig` (`llmConfig.apiKey`, `llmConfig.timeoutMs`), which is a local `const` in
+`createRuntime` initialised from `deps.llmConfig ?? { … env.LLM_PROVIDER … }`. Under the
+boundary above, the callback's reference to `llmConfig` does **not** by itself pull in
+`env`, `src/config/env.ts`, or the `zod` bare specifier: the initialiser is not part of
+the callback's reference set, so no part B allow-list entry for `zod` arises from it.
+Expanding initialisers instead would admit `zod` to a closed list whose stated purpose
+is to keep packages outside the Gemini egress claim (Part C), so the two readings are
+not interchangeable.
+
+**This exclusion is scoped to the callback's reference set, not to part B.** It does not
+narrow or widen the module-level traversal. A module still enters the part B closure
+through an independent, explicitly traversed value-level edge from one of the three
+roots, judged by the participation test exactly as before. What this paragraph settles
+is only the callback unit's own contribution: the identifiers its body references, the
+helpers it invokes and their value-level dependencies (C3–C4), and any additional local
+module needed for the transport value flow (C5).
+
+Applying the existing participation test to the same example: `src/config/env.ts` is
+reached from `runtime.ts` by a top-level value-level import, so it is a candidate edge
+under B1b. It is not one of the three roots, it is not the callback's dynamic-import
+target, and it does not supply a binding the callback body references — under the
+boundary above the callback references `llmConfig`, not `env`. An edge carrying only
+configuration defaults that the callback never names therefore fails the participation
+test and is recorded as excluded under B1d, like any other non-wiring edge. Should the
+implementation later make `env` a direct callback reference, that is a new fact and the
+edge is re-judged; the rule here is the boundary, not a verdict about one file.
+
 **Identification mechanism.** The callback is identified by AST structure plus binding
 resolution, in this order:
 
@@ -2118,9 +2237,15 @@ so its edges can be reported and cited. Its identifier is
 <module path>#createTransport@<line>:<column>
 ```
 
-for example `src/runtime.ts#createTransport@262:9`, where the location is that of the
+for example `src/runtime.ts#createTransport@262:26`, where the location is that of the
 callback's function expression — the node identified in step 4 or 5 of the mechanism
-above. The identifier is deterministic: it depends only on the file and the position of
+above. The column is that of the function expression itself (the `async` keyword of an
+arrow function, or the `function` keyword of a function expression), **not** that of the
+`createTransport` property key, which sits at an earlier column on the same line.
+Both components are **1-based** (§9.5.3.3a), so this example reads line 262, column 26:
+the `async` keyword is the 26th character of that line. The Compiler API reports that
+position as line index 261, character index 25; the recorded identifier adds one to
+each. The identifier is deterministic: it depends only on the file and the position of
 the callback, so two runs over the same source produce the same origin string. It is
 **not** a module path, is never entered into the closure as a module, and never counts
 toward module deduplication.
@@ -2207,6 +2332,21 @@ Section 9.5.3.3a's participation test and B1e–B1f govern what may be expanded.
 | 3   | Neither the composition root nor the factory opens a socket or issues a request itself                     |
 | 4   | The transport value passed to `createProvider` is the one built by the designated module, not a second one |
 | 5   | The wiring is visible as an explicit value flow — build, pass, inject — not an ambient lookup              |
+
+**A transport construction site is a call to `createGeminiTransport`.** Property 1 and
+condition 11 of §11.5.4 D are defined over **call expressions whose callee resolves to
+the `createGeminiTransport` binding exported by `gemini.transport.ts`** — not over
+`new` expressions. `GeminiTransport` is an `interface` (§9.5.3.2), so it has no
+constructor and no `new GeminiTransport` expression can exist; the only construction in
+the design is the `createGeminiTransport({ … })` call inside the callback. A scanner
+that searched for `new` would find zero sites and could pass vacuously, which is
+precisely what this definition prevents.
+
+Two consequences follow. A second call to `createGeminiTransport` anywhere on the part B
+path is a **second construction site** and fails condition 11, whether or not its result
+is injected. A construction of a different provider implementation — `new FakeProvider(…)`
+on the `fake` branch — is **not** a `GeminiTransport` construction site and is
+classified under §9.5.3.3a instead.
 
 **How properties 4 and 5 are checked.** This part is not a pure text search, and it
 is not satisfied by finding a construction site and a callback return separately.
@@ -4909,25 +5049,116 @@ M4.5 depends on M4.2 and M4.4, both accepted. Its stop condition is
 
 **B. Deliverables.**
 
-| #   | Deliverable                                                                                                                                                                                                                                  |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | A closure scanner implementing part A (§9.5.3.1 rules 1–6) over the adapter closure                                                                                                                                                          |
-| 2   | The same scanner implementing part B (§9.5.3.3a rules B1, B1a–B1g, B2–B6, B6a) over the bounded production wiring closure, with module identity, syntactic edge identity and traversal deduplication (§9.5.3.3a)                             |
-| 3   | Callback identification by AST structure and binding resolution, failing closed on multiple invocations, multiple `createTransport` properties, or an unresolvable identifier reference (§9.5.3.3b)                                          |
-| 4   | A callback analysis unit (§9.5.3.3b) resolving the callback's dynamic-import target, referenced bindings, local helpers and their dependencies, with the unit's stable origin identifier and the declaration-versus-reference reporting rule |
-| 5   | Stage 1 production call-site evidence: the bounded `src/index.ts` witness — the `createRuntime()` invocation, its argument count, the default-parameter behaviour, and the alias-to-export resolution (§9.5.3.3a)                            |
-| 6   | The five-stage end-to-end value trace of §9.5.3.3a, joined as a single chain from factory selection to provider injection                                                                                                                    |
-| 7   | Binding-identity resolution for Stage 4→5, applying the preserved/not-provable table of §9.5.3.3a and failing closed on any unprovable transformation                                                                                        |
-| 8   | Stage 4 callback-invocation enumeration: exactly one `deps.createTransport()` call on the production factory path, its awaited result reaching the Stage 5 constructor argument (§9.5.3.3a)                                                  |
-| 9   | `tests/fixtures/llm-architecture-allowlist.ts`, as specified in §9.5.3.5a, with the five-field schema including `kind`                                                                                                                       |
-| 10  | Assertions covering part A: no networking import, no global `fetch`, no dynamic import, no unlisted bare specifier                                                                                                                           |
-| 11  | Assertions covering part B properties 1–5, including the end-to-end value trace from construction to injection                                                                                                                               |
-| 12  | An auditable exclusion record for every syntactic edge failing the participation test, with origin, edge kind, source location, target and reason                                                                                            |
-| 13  | A required limitations statement, reproduced from §9.5.3.3                                                                                                                                                                                   |
+| #   | Deliverable                                                                                                                                                                                                                                               |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | A closure scanner implementing part A (§9.5.3.1 rules 1–6) over the adapter closure                                                                                                                                                                       |
+| 2   | The same scanner implementing part B (§9.5.3.3a rules B1, B1a–B1g, B2–B6, B6a) over the bounded production wiring closure, with module identity, syntactic edge identity and traversal deduplication (§9.5.3.3a)                                          |
+| 3   | Callback identification by AST structure and binding resolution, failing closed on multiple invocations, multiple `createTransport` properties, or an unresolvable identifier reference (§9.5.3.3b)                                                       |
+| 4   | A callback analysis unit (§9.5.3.3b) resolving the callback's dynamic-import target, referenced bindings, local helpers and their dependencies, with the unit's stable origin identifier and the declaration-versus-reference reporting rule              |
+| 5   | Stage 1 production call-site evidence: the bounded `src/index.ts` witness — the `createRuntime()` invocation, its argument count, the default-parameter behaviour, and the alias-to-export resolution (§9.5.3.3a)                                         |
+| 6   | The five-stage end-to-end value trace of §9.5.3.3a, joined as a single chain from factory selection to provider injection                                                                                                                                 |
+| 7   | Binding-identity resolution for Stage 4→5, applying the preserved/not-provable table of §9.5.3.3a and failing closed on any unprovable transformation                                                                                                     |
+| 8   | Stage 4 callback-invocation enumeration: exactly one `deps.createTransport()` call on the production factory path, its awaited result reaching the Stage 5 constructor argument (§9.5.3.3a)                                                               |
+| 9   | `tests/fixtures/llm-architecture-allowlist.ts`, as specified in §9.5.3.5a, with the five-field schema including `kind`                                                                                                                                    |
+| 10  | Assertions in `tests/unit/core/llm/architecture-scan.test.ts` covering part A: no networking import, no global `fetch`, no dynamic import, no unlisted bare specifier                                                                                     |
+| 11  | Assertions in the same file covering part B properties 1–5, including the end-to-end value trace from construction to injection                                                                                                                           |
+| 12  | Assertions in the same file verifying the Scanner's auditable exclusion record for every edge failing the participation test: origin, edge kind, source location, target and reason (closed set, §11.5.4 B), as a structured in-memory result (see below) |
+| 13  | A required limitations statement in the same file, reproduced from §9.5.3.3                                                                                                                                                                               |
 
 Deliverable 1 is expected to pass with **zero findings**: the adapter closure is
 `gemini.provider.ts` and `llm.errors.ts`, and neither imports a networking module.
 A non-empty finding set here is a defect, not a list to allow-list.
+
+**The exclusion report is an in-memory result, not a checked-in artifact.** The Scanner
+returns a structured value — an array of exclusion records — and the tests assert
+against that returned value directly. Each record exposes the five fields the rules
+already require: `origin` (a module path or a callback-unit identifier),
+`edgeKind`, `sourceLocation` (`line:column` in the originating file), `target` (the
+resolved repository-relative path, or the bare specifier for a non-expanded edge) and
+`reason`.
+
+`edgeKind` uses the same vocabulary as the scan report of §9.5.3.5a — `static-import`,
+`re-export`, `require`, `dynamic-import` — plus `type-only`, which is a valid **report**
+value (an excluded edge, `excluded: 'type-only'`) even though it is never a valid
+**allow-list** `kind`. The two vocabularies are deliberately not identical, and this
+field follows the report's.
+
+`reason` is drawn from the seven-member closed enumeration below and is asserted by
+membership, never by prose; a test that checked only that some string was present would
+pass on any scanner, including one that explained nothing. The enumeration is closed
+because a free-text reason cannot be asserted against: two correct scanners would emit
+different sentences for the same excluded edge. A record whose `reason` is outside the
+set fails the scan, and an implementation may not add a member without an explicit
+revision of this section.
+
+| `reason`               | Applied when the edge fails the participation test because…                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `type-only`            | the edge is a type-only declaration (rule B2); this is the one member that is also a disposition, not a judgement  |
+| `bare-specifier`       | the target is a bare package specifier, recorded but never expanded (rule B6)                                      |
+| `http-composition`     | the target is reached from the composition root to build the HTTP surface — `app.ts`, `routes/`, middleware        |
+| `persistence`          | the target supplies database, migration or repository wiring                                                       |
+| `health-and-probes`    | the target supplies readiness, draining or health probes                                                           |
+| `lifecycle`            | the target supplies shutdown, draining, signal or request-tracking state                                           |
+| `not-transport-wiring` | the target matches none of the roles above; this is the residual member, applied when no earlier row matched       |
+
+**The decision order is normative, and it is a two-stage decision.** Stage one is the
+**participation decision**: the participation test of §9.5.3.3a decides, for each
+syntactic edge, whether the edge is traversed or excluded. This stage is decided by
+actual wiring participation and by nothing in the `reason` vocabulary. Stage two is the
+**exclusion classification**: it assigns exactly one `reason` to an edge that stage one
+has already excluded. Stage two never runs on a traversed edge, and its outcome never
+feeds back into stage one.
+
+Within stage two the first matching row wins, in the order listed. `type-only` and
+`bare-specifier` are decided from the edge's own kind and specifier before any module is
+considered, so they take precedence over the five module-level judgements. Among the
+module-level members the order above resolves a target that is both, say, persistence
+and lifecycle: the persistence row wins. The order exists so that a target's `reason` is
+a function of the target and the rule, not of the scanner's implementation choices.
+
+**`not-transport-wiring` is the residual member, not a competing test.** It applies when,
+and only when, no earlier row matched — that is, when an edge stage one has already
+excluded carries no type-only kind, no bare specifier, and none of the five module-level
+roles. It is deliberately defined by exclusion from the other six members rather than by
+a positive property of the target, because a positive property would make the
+enumeration non-total: an excluded target satisfying no listed property would receive no
+member at all, and the record would have an empty `reason`. Defining it as the residual
+keeps the enumeration total and keeps its condition identical to the decision order
+above. In particular, the residual member does **not** claim that an excluded target
+carries no configuration value flow: `src/config/env.ts` supplies configuration defaults
+and is still excluded under B1d (§9.5.3.3b), so a positive "carries no configuration
+value flow" test would either leave that edge unreasoned or contradict its own exclusion.
+The correct statement is the weaker and total one: no earlier row matched.
+
+**The five module-level members are decided by directory and role, not by import
+distance.** This is a deliberate exception to §9.5.3.3a's rule that scope is decided by
+actual wiring participation rather than by path. The two stages answer different
+questions: **whether** an edge is traversed is decided by the participation test; **why**
+a non-participating edge was excluded is a classification of an edge already known to be
+out of scope, and a classification may key on the target's role. A scanner must not use
+the `reason` vocabulary to widen or narrow traversal — B1e still forbids expanding an
+excluded target, and no `reason` value may cause an edge to be traversed that stage one
+excluded, nor cause an edge to be excluded that stage one traversed. The classification
+is therefore strictly downstream of traversal and cannot change it.
+
+Because `not-transport-wiring` is the residual, every edge that fails the participation
+test receives exactly one member: the first row it matches, or the residual when it
+matches none. That is what makes the enumeration total.
+
+No separate report file is created, and the report is not the Scanner. The **report** is
+a return value: a typed array produced in memory and asserted where it is consumed. The
+**Scanner** is the test helper module that computes it (§11.5.4 I), and it is consumed by
+the assertions in `tests/unit/core/llm/architecture-scan.test.ts`. Neither is a
+checked-in artifact of its own — the report exists only as a value at test time, and the
+Scanner is test-only support code. Deliverable 9's allow-list fixture is the only new
+**fixture or data** artifact. Auditability is unaffected: the records are typed, returned
+from a named function, and asserted field by field, so a reviewer reads the assertions
+rather than a generated document that could drift from them. Assertions over the
+exclusion records inspect this returned value — for example that a module known to be
+excluded appears with the expected `reason` — and never parse console output, which is
+neither stable nor inspectable. `N20` remains the paired control for the bounded witness
+and continues to be detected through the part B allow-list, where an over-read would
+admit `express`; it is not reinterpreted as a report-record assertion here.
 
 **C. Allow-list requirements.** Both lists live in the single fixture of
 §9.5.3.5a. Every entry names its specifier, its part, its origin, its edge kind and its
@@ -4967,13 +5198,17 @@ a witness read cannot widen the closed set.
    three module-level roots and the nested callback unit of §9.5.3.3a, every excluded
    edge was recorded under B1d with origin, edge kind, source location, target and
    reason, no excluded target's subgraph was scanned (B1e), and no syntactic edge from
-   an analysed origin is missing from the report (B1g);
+   an analysed origin is missing from the report (B1g). Every recorded `reason` is a
+   member of the closed enumeration of §11.5.4 B, and every recorded `source location`
+   is a 1-based `line:column` pair;
 3. **module identity, syntactic edge identity and traversal deduplication hold**: each
    module is analysed once however many edges reach it; every distinct syntactic edge
    is reported exactly once with its own kind and disposition; no two edges sharing an
-   origin and target were merged; and a callback's reference to an imported binding is
-   reported as a separate edge from that binding's import declaration, neither
-   duplicated nor re-attributed (§9.5.3.3a, §9.5.3.3b);
+   origin and target were merged; a declaration mixing value and type bindings is
+   reported as two edges differing in kind and sharing one source location; and a
+   callback's reference to an imported binding is reported as a separate edge from that
+   binding's import declaration, neither duplicated nor re-attributed (§9.5.3.3a,
+   §9.5.3.3b);
 4. **the callback was identified uniquely**: exactly one `providerFactory` invocation
    and exactly one `createTransport` property on the production path, resolved by AST
    structure and binding resolution, with no identifier reference left unresolved
@@ -5002,8 +5237,9 @@ a witness read cannot widen the closed set.
 10. **transport identity is proved, not typed**: the Stage 4→5 hop used only a form the
     identity table of §9.5.3.3a preserves, and no separately constructed or substituted
     transport was accepted on the basis of a matching TypeScript type;
-11. part B reports exactly one `GeminiTransport` construction site, resolving to
-    `gemini.transport.ts`;
+11. part B reports exactly one `GeminiTransport` construction site — one call expression
+    resolving to the `createGeminiTransport` binding of `gemini.transport.ts`
+    (§9.5.3.3b), not a `new` expression, since `GeminiTransport` is an interface;
 12. `src/runtime.ts` contains no static import of `gemini.transport.ts`, and its only
     reference to that module is the literal specifier inside the callback body;
 13. part B's allow-list is closed over **analysed** modules only, with no unlisted
@@ -5026,6 +5262,45 @@ particular cannot be satisfied by finding a construction site and a callback ret
 independently: the two must be joined through the factory's local binding, and the join
 must survive the identity table rather than resting on type equality.
 
+Revision 5 closed three definitions that the implementation pre-check found
+underspecified, without adding or removing any condition. First, **source locations are
+1-based in both components** (§9.5.3.3a): the Compiler API's `getLineAndCharacterOfPosition`
+is 0-based, so an implementation must add one to each component, and the `262:26`
+example in §9.5.3.3b is stated against that convention. Second, the **`reason` field of
+an exclusion record is a closed seven-member enumeration** with a normative decision
+order (§11.5.4 B); free prose was not assertable, so the field could not be tested.
+Third, a **declaration mixing value and type bindings yields exactly two edges** — one
+`static-import` and one `type-only` — sharing a source location and distinguished by
+kind (§9.5.3.3a), which is what makes the edge-cardinality rules of P10, P11 and N19
+well-defined for the five mixed declarations in `src/runtime.ts`. Revision 5 also
+records that **P1, P3, P10, P11 and P15 are fixture-based** (§11.5.4 E), because the
+production tree does not exercise them: the part A closure is one edge deep, the
+callback invokes no local helper, the callback references no imported binding, no
+analysed module imports one target both type-only and dynamically, and no analysed
+module declares one target in two separate static import statements. No condition
+changed its number or its meaning.
+
+**Revision 5 also separates the participation decision from the exclusion
+classification, and makes the residual member total.** The `reason` enumeration now
+states explicitly that traversal is decided first, by the participation test, and that
+classification runs only on edges already excluded and never feeds back into traversal
+(§11.5.4 B); no `reason` value can widen or narrow the closure. `not-transport-wiring`
+is redefined as the **residual** member — it applies when no earlier row matched —
+rather than by the positive property "carries no provider, transport or configuration
+value flow". The positive form was not total: `src/config/env.ts` supplies configuration
+defaults, is excluded under B1d (§9.5.3.3b), and would therefore have satisfied no row
+under the old wording, leaving its record without a `reason`. The residual definition
+keeps the fallback condition identical to the decision order and leaves every other
+member, every control and every edge-identity or allow-list rule unchanged.
+
+**Revision 5 is stated against the working-tree document, not against `HEAD`.** The
+authorised base for this revision is the working-tree state `e7016155…62bcb2`, which
+already carries the approved but uncommitted Revision 3.1–3.4 content; the committed
+`HEAD` document is `6c37de91…9ad81b4f6`. Revision 5's edits are the difference from
+`e7016155…62bcb2` alone, and a diff against `HEAD` therefore mixes earlier approved
+revisions with this one. The distinction is recorded so that no earlier content is
+attributed to Revision 5.
+
 **T-10a as a whole does not pass in M4.5.** Assertion 4 (process-level network
 isolation) remains **BLOCKED** under B-6, which M4.5 does not address. The suite must
 make the partial state explicit — assertion 5 satisfied, assertion 4 blocked — and
@@ -5039,21 +5314,23 @@ only assertions against the real tree.
 
 | #   | Control                                                                                                                                                                                  |
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| P1  | The walker reaches a module two static edges deep, proving transitive traversal rather than a single-file read                                                                           |
+| P1  | The walker reaches a module two static edges deep, proving transitive traversal rather than a single-file read. **Fixture-based**: the real part A closure is only one edge deep         |
 | P2  | A literal dynamic import in part B is followed to its target and recorded                                                                                                                |
-| P3  | A **callback-reachable local helper** is included in the bounded closure, even though it is imported at the composition-root level                                                       |
+| P3  | A **callback-reachable local helper** is included in the bounded closure though imported at composition-root level. **Fixture-based**: the production callback invokes no local helper   |
 | P4  | An **unrelated runtime import** is recorded as excluded, and its dependency subtree is **not** traversed (verified by a sentinel module beneath it that must never appear in the report) |
 | P5  | A module reached by several edges is **analysed once**, while each of those edges is still reported separately (§9.5.3.3a module deduplication)                                          |
 | P6  | The **default `providerFactory` fallback** is resolved through the alias binding and the nullish-coalescing expression                                                                   |
 | P7  | The **production call site** is resolved: `src/index.ts` calls `createRuntime()` with no arguments, the default `{}` is established, and `deps.createProvider` is therefore `undefined`  |
 | P8  | The **callback-returned transport** is traced through `deps.createTransport()` into the `new GeminiProvider(...)` constructor                                                            |
 | P9  | A **direct alias** (`const t = transport`) is followed and still proves identity at the constructor argument                                                                             |
-| P10 | A **type-only import and a literal dynamic import of the same target** are reported as **two** edges with dispositions `excluded: 'type-only'` and `followed` respectively               |
-| P11 | **Two separate static import declarations of the same target** are reported as **two** `static-import` edges differing in source location, not merged                                    |
+| P10 | A **type-only import and a literal dynamic import of one target** are reported as **two** edges, `excluded: 'type-only'` and `followed`. **Fixture-based**: no real-tree instance        |
+| P11 | **Two separate static import declarations of one target** are reported as **two** `static-import` edges differing in source location, not merged. **Fixture-based**: no real instance    |
 | P12 | The **entry-point witness stays bounded**: `src/index.ts` is inspected for the call site only, and `express` does not appear in the part B allow-list                                    |
 | P13 | **Exactly one `deps.createTransport()` invocation**, with its awaited result injected into the constructor, passes Stage 4                                                               |
 | P14 | A **bare specifier occurring only on `type-only` edges** in an analysed module is reported as excluded and does not fail the closed-list check (B6a)                                     |
-| P15 | A binding imported at module scope **and** referenced in the callback yields exactly **two** entries: one declaration edge, one reference edge (§9.5.3.3b)                               |
+| P15 | A module-scope import **and** its callback reference yield exactly **two** entries: declaration and reference edges (§9.5.3.3b). **Fixture-based**: no imported binding is referenced    |
+| P16 | A **valid baseline containing exactly one correctly resolved `createGeminiTransport` construction site** passes condition 11                                                             |
+| P17 | `src/runtime.ts` is shown to have **no static import of `gemini.transport.ts`** — its only reference is the callback's literal specifier (condition 12)                                  |
 
 **Negative controls** — the scanner must be shown to _fail closed_:
 
@@ -5072,7 +5349,7 @@ only assertions against the real tree.
 | N11 | **Two `createTransport` properties** at the invocation fail rather than one being selected                                                                                 |
 | N12 | An **identifier-referenced callback** resolving to a conditional assignment or more than one declaration fails                                                             |
 | N13 | The **production call site is unresolved**, or passes a dependencies object whose `createProvider` cannot be resolved — fails rather than assuming the default             |
-| N14 | A **separately constructed transport of the same TypeScript type** — a second `new` or a call expression at the constructor argument — fails identity                      |
+| N14 | A **separately constructed transport of the same TypeScript type** — a second `createGeminiTransport` call at the constructor argument — fails identity                    |
 | N15 | A **binding reassigned** between Stage 4 and Stage 5 fails identity                                                                                                        |
 | N16 | **Two `deps.createTransport()` invocations** where the first result is discarded fail, even though the second is injected                                                  |
 | N17 | A `deps.createTransport()` invocation **through an unresolved alias** (`const ct = deps.createTransport; await ct()`) fails                                                |
@@ -5081,6 +5358,8 @@ only assertions against the real tree.
 | N20 | **The witness is over-read**: a scanner that traverses `src/index.ts`'s imports and admits `express` to the part B allow-list fails                                        |
 | N21 | A **type-only bare specifier is treated as needing an allow-list entry** — a scanner that fails the run because `express` is unlisted fails this control                   |
 | N22 | A **callback-referenced imported binding is reported twice as a declaration**, or its declaration is re-attributed to the callback unit — the provenance control fails     |
+| N23 | A **mutation introducing a second `createGeminiTransport` construction site** on the part B path is detected and causes condition 11 to fail                               |
+| N24 | A **static import of `gemini.transport.ts` added to `src/runtime.ts`** is not detected, or does not fail condition 12 — the control fails                                  |
 
 P1–P2 and N4, N7–N9 are carried forward from the first revision. P5 and N10–N12 are
 the module-deduplication and callback-identification controls; P6–P7 and N5, N13 are
@@ -5102,22 +5381,89 @@ a scanner that demands an allow-list entry for a type-only bare specifier must f
 control rather than the run. P13 and N16–N18 are the callback-invocation controls:
 P13 is the single-invocation pass, and the three negatives cover a discarded result, an
 aliased callee, and an invocation whose uniqueness a branch, loop or `try`/`catch`
-defeats. P15 and N22 are the provenance pair for §9.5.3.3b: P15 fixes the expected
+defeats.
+
+P16 and N23 are the transport-construction-site pair for condition 11, and they test
+**complementary** outcomes rather than the same scenario twice. P16 is the positive
+baseline: a tree containing exactly one `createGeminiTransport` construction site, whose
+callee resolves by symbol to the binding exported by `gemini.transport.ts`, passes
+condition 11 and reports that single site. N23 is the negative mutation: starting from
+that passing baseline, introducing a second `createGeminiTransport` construction site on
+the part B path must be detected and must fail condition 11. P16 therefore fixes what
+"exactly one" means at the passing end, and N23 fixes that the count is actually
+enforced at the failing end; without P16 a scanner could pass N23 vacuously by failing
+every input, and without N23 a scanner could pass P16 while never counting a second site.
+
+P17 and N24 are the static-import pair for condition 12: P17
+proves `src/runtime.ts` carries no static import of `gemini.transport.ts` with the
+callback's literal specifier as its only reference, and N24 proves that adding such a
+static import is detected and fails the condition. Both conditions assert an absence, so
+without their negatives a scanner that never looked would satisfy them vacuously — the
+case §11.5.4 E exists to exclude.
+
+Without these pairs the new rules could be satisfied vacuously.
+
+**Five controls are fixture-based, and the reason is a property of the current source.**
+P1, P3, P10, P11 and P15 each assert a capability the production tree does not currently
+exercise, so each must be demonstrated on a purpose-built fixture rather than on `src/`.
+The distinction is stated here because a control that silently falls back to the real
+tree would pass while proving nothing:
+
+- **P1** — the part A closure is `gemini.provider.ts` → `llm.errors.ts`, and `llm.errors.ts`
+  has no imports. The closure is therefore **one** static edge deep, so a two-deep reach has
+  no real-tree witness.
+- **P3** — the production callback's body invokes exactly one callee, `createGeminiTransport`,
+  which is its own destructured dynamic-import binding, not a local helper. No
+  callback-reachable local helper exists.
+- **P15** — the production callback references no module-scope imported binding: its body
+  mentions only `llmConfig`, `llmConfig.apiKey`, `llmConfig.timeoutMs` and
+  `createGeminiTransport`. The two-entry cardinality has no real-tree instance.
+- **P10** — no analysed module imports one target twice, once type-only and once
+  dynamically. Each target of `runtime.ts`, `provider.factory.ts` and
+  `gemini.transport.ts` carries a single declaration, so the two-edge disposition
+  (`excluded: 'type-only'` beside `followed`) has no real-tree instance. A declaration
+  that mixes value and type bindings is **not** this case: it is one declaration split by
+  binding kind (§9.5.3.3a), and it exercises the mixed-declaration rule rather than P10.
+- **P11** — no analysed module declares the same target in two separate static import
+  statements, so two `static-import` edges differing only in source location have no
+  real-tree instance.
+
+These five are not weaker evidence for being fixture-based; they are the only possible
+evidence, and the limitation is recorded rather than papered over. The controls named
+above are the five this revision classifies; the classification of the remaining
+positive controls is left as it stood, and no control is downgraded from real-tree to
+fixture by this paragraph. A future change that gives the real tree a two-deep part A
+closure, a callback-invoked local helper, a callback-referenced imported binding, a
+target imported both type-only and dynamically, or a target imported twice statically
+should move the corresponding control from fixture to real tree, and this paragraph
+should then be revised.
+
+**The fixtures exist to exercise the Scanner, not to describe production.** P10 and P11
+assert the edge identity and cardinality rules of §9.5.3.3a — that edge kind and source
+location separate edges to one target, and that endpoint equality never merges them.
+Their purpose is to make those rules falsifiable; it is not a claim that the current
+production source contains such a structure. N19 is the paired negative for the same
+rules: a scanner that deduplicates on endpoints alone must fail it. Read together, P10,
+P11 and N19 pin the identity tuple from both ends, and a passing P10 or P11 on a fixture
+is the intended evidence rather than a substitute for missing real-tree coverage.
+
+P15 and N22 are the provenance pair for §9.5.3.3b: P15 fixes the expected
 cardinality at two entries — one declaration edge and one reference edge — when a
 binding is both imported at module scope and used in the callback, and N22 fails a
 scanner that reports the declaration twice or re-attributes it to the callback unit.
-
-Without these pairs the new rules could be satisfied vacuously.
+Both are fixture-based for the reason given above, and they assert the reporting rule
+of §9.5.3.3b, which the real tree currently leaves unexercised.
 
 Negative controls should follow the existing `dry-run.test.ts` precedent: write the
 fixture into `mkdtempSync` temporary space and remove it in a `finally` block, so no
 scan fixture lands in `src/`. A negative control that cannot fail proves nothing.
 
-**F. Required limitations statement.** The deliverable records, in the test file,
-the three limits from §9.5.3.3: the analysis is source-text and import-graph
-reasoning rather than a proof; it cannot see a runtime-computed module name; and it
-does not execute the code, so runtime egress is assertion 4's subject. The scope
-statement of §9.5.3.3a is quoted, not paraphrased upward.
+**F. Required limitations statement.** The deliverable records, in
+`tests/unit/core/llm/architecture-scan.test.ts`, the three limits from §9.5.3.3: the
+analysis is source-text and import-graph reasoning rather than a proof; it cannot see
+a runtime-computed module name; and it does not execute the code, so runtime egress is
+assertion 4's subject. The scope statement of §9.5.3.3a is quoted, not paraphrased
+upward.
 
 **G. Verification gates.** `typecheck`, `lint`, `format:check`, `build`, and the full
 Vitest suite. Because M4.5 adds no production code, the existing suite must remain
@@ -5131,9 +5477,47 @@ to edit.
 - implement or modify T-16a/b/c, T-17 or T-18 — those remain assigned to **M4.7**;
 - change the transport's HTTP behaviour, its security requirements, or the runtime's
   lazy composition (§9.5.5.1) — those are accepted in M4.1–M4.4 and are inputs here;
-- alter `PROJECT_STATUS.md`, `docs/architecture.md`, or any production or test
-  source beyond the new fixture and the new assertions;
+- alter `PROJECT_STATUS.md`, `docs/architecture.md`, or any production source. M4.5
+  writes exactly three files and nothing else:
+  `tests/fixtures/llm-architecture-allowlist.ts` (deliverable 9, the allow-list
+  fixture), `tests/helpers/architecture-scan.ts` (the test-only scanner helper,
+  §11.5.4 I) and `tests/unit/core/llm/architecture-scan.test.ts` (deliverables 10–13,
+  the assertions). The fixture is the only new **fixture or data** artifact; no
+  exclusion-report file or other generated artifact is written. No existing test is
+  modified or deleted, and no production file under `src/` is created, modified or
+  removed;
 - mark T-10a passing, or reopen M4.3 or M4.4.
+
+**I. Scanner location and analysis foundation.** The scanner lives at
+`tests/helpers/architecture-scan.ts`. It is test-only support code: it is imported by
+`tests/unit/core/llm/architecture-scan.test.ts`, the new test file holding deliverables
+10–13, and it is excluded from `dist` by `tsconfig.build.json`'s `include: ["src"]`.
+It introduces **no** production source. Section A's rule therefore holds without
+exception — the scan cannot be satisfied by editing `src/`, and it cannot be satisfied
+by shipping the scanner as product code either. Both files are among the three artifacts
+§11.5.4 H authorises; neither is covered by H's prohibition, and neither creates an
+allow-list or reporting obligation of its own.
+
+The assertion file is **new**: `tests/unit/core/llm/architecture-scan.test.ts` does not
+exist in the repository and is created by M4.5. It is the only new test file, and no
+existing test file is modified or deleted. It is discovered by the existing
+`vitest.config.ts` pattern `tests/**/*.test.ts`, so no configuration change is required,
+and it is type-checked through `tsconfig.test.json`'s `include: ["tests"]`.
+
+The AST parsing and binding-analysis foundation is the **existing TypeScript Compiler
+API** (`typescript`, already a dev dependency, via `ts.createSourceFile` and the
+program/checker interfaces). No new parser dependency is added, so M4.5 adds no
+`package.json` entry.
+
+Syntax parsing alone is not sufficient and is not what this section authorises. The
+obligations of §9.5.3.3a and §9.5.3.3b — resolving an alias to its declaration,
+deciding whether a callee resolves to the `createTransport` property or to the
+`createGeminiTransport` binding, resolving a callback identifier to a single function
+expression, and distinguishing a declaration edge from a reference edge — are
+**binding-resolution** questions. The scanner must therefore use the type checker's
+symbol and reference information, not a bare parse tree plus textual matching. A
+scanner that pattern-matched identifiers would satisfy the syntax and fail the
+semantics these controls exist to test.
 
 ### 11.6 API interface re-evaluation: Interactions API vs `generateContent` (M4.0.1)
 
