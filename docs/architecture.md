@@ -7,9 +7,12 @@ Telegram bot.
 
 This document describes the architecture as it exists today and separates
 clearly what is implemented from what is only planned. Implemented today: the
-HTTP server with liveness and readiness endpoints, and a one-shot, SQLite-backed
-ingestion CLI. Not implemented: translation, summarization, briefing generation,
-notification delivery, and scheduling.
+HTTP server with liveness and readiness endpoints, a one-shot, SQLite-backed
+ingestion CLI, a one-shot article extraction CLI, and a provider-agnostic LLM
+abstraction with a Gemini adapter (built, but not yet called by any production
+path). Not implemented: translation, summarization, classification, importance
+ranking, briefing generation, original-content retention, notification delivery,
+the news API, and scheduling.
 
 ## Architectural style
 
@@ -643,6 +646,97 @@ borrow it too, so probing does not open a second connection.
 which keeps an ORM or a different provider replaceable later without reshaping
 module code.
 
+## Original-content retention (planned)
+
+> **Status: requirement only. Nothing described in this section is implemented.**
+> This section is the single authoritative statement of the retention
+> requirements. Other documents should link here rather than restate the rules.
+
+Kou News Engine is intended to keep the *body text of original articles* only
+temporarily, while keeping the *derived* long-term records permanently. The
+requirements below are Owner-confirmed.
+
+### Retention clock
+
+- The clock starts at the **first successful download** of an article — that is,
+  the moment the article body is fetched and stored.
+- The period is **7 × 24 hours (168 hours)** from that instant. It is **not**
+  seven calendar days ending at midnight, and it does not reset at a timezone
+  boundary.
+- **Rediscovery of the same article must not restart or extend the clock.** The
+  first successful download timestamp remains the authoritative reference for
+  the life of the record.
+
+### Separate storage of original content and derived records
+
+- Original article content and AI-generated summaries must be **stored
+  separately**.
+- Expiry of the original content must **not** delete its summary, index, or
+  classification.
+- Summaries, indexes, and classifications are retained **long-term** for
+  historical search and trend analysis.
+
+### No existing timestamp column is a suitable anchor
+
+This is a schema finding, not a design preference. Each candidate column fails
+the "rediscovery must not reset the clock" requirement or measures the wrong
+event:
+
+| Column | What it records | Why it is unsuitable |
+| --- | --- | --- |
+| `articles.fetched_at` | When the ingestion run processed the feed entry | **Rewritten on rediscovery.** The ingestion upsert refreshes it via `ON CONFLICT (id) DO UPDATE`, so re-collecting an article resets it. |
+| `article_contents.extracted_at` | When extraction last completed | **Rewritten on re-extraction.** A completed extraction sets it again, and bumping `EXTRACTOR_VERSION` re-queues every stored article, resetting it across the whole table. |
+| `article_sources.first_seen_at` | When a provenance identity was first observed in a feed | Measures **feed observation**, not first successful article download. It is also **per provenance row**, not per article, so one article can carry several different values. |
+
+**A new immutable first-download timestamp will therefore be required before
+retention can be implemented.** It must be written once, at the transition to a
+successfully extracted article, and never updated afterwards — in particular not
+by a re-extraction. This document does not prescribe that column's name, type,
+or migration; it records only that an immutable anchor is a prerequisite.
+
+### Relationship to cascading deletes
+
+The existing schema cascades deletion from `articles`:
+
+- `article_sources.article_id` references `articles (id) ON DELETE CASCADE`.
+- `article_contents.article_id` references `articles (id) ON DELETE CASCADE`.
+
+If future summary, index, or classification storage were given the same
+cascade, expiring original content would **delete the long-term records too**,
+which directly violates the requirement above.
+
+> **Design consideration, not an approved decision.** Any future summary, index,
+> or classification table must avoid cascading from `articles` in a way that
+> lets original-content expiry remove long-term data. The specific foreign-key
+> design (no foreign key, `ON DELETE SET NULL`, a soft reference, or a separate
+> table) is deliberately **not** decided here.
+
+### Deletion mechanism — pending Owner decision
+
+**The deletion mechanism is undecided.** The Owner has not chosen between hard
+deletion, soft deletion, a hybrid, deleting the whole `article_contents` row, or
+nulling `content_text` while keeping a tombstone. This document must not be read
+as endorsing any of them, and no implementation may pick one without an explicit
+Owner decision.
+
+### Residual copies
+
+Expiring a row from the live database does **not** erase every physical copy of
+the content. Any retention claim describes *live database content only*. Known
+residual locations:
+
+- **SQLite freelist pages.** SQLite does not shrink the database file when rows
+  are deleted. Freed pages are reused by later writes, and the bytes can remain
+  readable in the file until overwritten or reclaimed with `VACUUM`.
+- **WAL and `-shm` files.** In WAL mode, recently written pages may remain in the
+  `-wal` sidecar file until a checkpoint, and the `-shm` file is transient shared
+  memory. Neither is scrubbed by deleting a row.
+- **Backups.** Any backup taken before expiry contains the content and is
+  unaffected by later deletion.
+- **Logs and caches.** Any future logging, tracing, or caching layer that copies
+  article bodies becomes another copy that retention does not reach. No such
+  copy exists today.
+
 ## LLM provider boundary (I7-1b)
 
 `src/core/llm/` holds a vendor-free provider abstraction. Business code depends on
@@ -676,11 +770,13 @@ never names a vendor, an SDK or a transport.
 The following are **not** implemented. No interfaces or adapters for them exist in
 the code yet, and nothing in this repository performs them today:
 
-- **article extraction** — turning raw feed entries into fuller article text.
-  Today the ingestion module stores what the feed provides; it does not fetch and
-  extract the article body.
 - **translation and summarization** — producing Traditional Chinese summaries,
   via a provider-agnostic LLM adapter.
+- **classification and importance ranking** — categorising articles and ordering
+  them by significance.
+- **original-content retention** — expiring stored article bodies. The
+  requirements are specified in _Original-content retention (planned)_ above; no
+  behaviour is implemented.
 - **briefing generation** — assembling the daily briefing.
 - **notifications** — independent delivery adapters for Kou AI and the Telegram
   bot.

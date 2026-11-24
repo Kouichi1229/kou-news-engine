@@ -1,6 +1,6 @@
 # Kou News Engine — Project Status & Handoff
 
-Last updated: 2026-11-18 (M5.0-R2: Owner M4.5 decision recorded, decision numbering and cross-references corrected; verification pending review. GOV-1: Single-Maintainer Governance Model adopted as documentation — platform configuration not performed)
+Last updated: 2026-11-18 (M6.0 documentation reconciliation: status refreshed against verified post-merge repository state — ruleset active, PR #1 merged, M5.1 reclassified PARTIAL, retention requirements recorded, Gemini model-ID validity recorded as unverified)
 
 ## 1. Purpose
 
@@ -83,6 +83,33 @@ remains the pre-M4.4 commit `40bd62d`. The entire LLM layer under
 in the working tree and cannot be recovered from HEAD. A checkpoint commit has
 not been created.
 
+> **The paragraph above is a historical record of the M4.4 period and is no
+> longer true.** It is preserved verbatim because this document does not rewrite
+> history. The current state is recorded below.
+
+### Current state (M6.0 reconciliation)
+
+| Item | Current value |
+| --- | --- |
+| Local branch | `docs/m6-0-reconciliation` (created for M6.0) |
+| Local branch base | `17a8c1cfbd28903fa204f0aa75baedac8c006e8f` |
+| Remote `main` | `17a8c1cfbd28903fa204f0aa75baedac8c006e8f` |
+| Working tree | Clean — 0 modified, 0 staged, 0 untracked |
+
+- **PR #1 was merged into `main`** at merge commit
+  `17a8c1cfbd28903fa204f0aa75baedac8c006e8f`. The merge is a true two-parent
+  merge commit; its first parent is the previous `main` head `fd3a37b` and its
+  second parent is the source branch head `82db0314`.
+- **The local `feat/bootstrap-publication` branch has not moved to `main`.** It
+  still points at `82db0314d8dbfe5d1e595ad537bd0e4096d5ba91`. Its tree is
+  identical to the merge commit's tree, but the branch reference itself is
+  unchanged.
+- **The LLM layer, its tests, the design document and this status file are all
+  committed and present in `HEAD`.** The earlier statement that they "cannot be
+  recovered from HEAD" is historical only.
+- This table records a point-in-time observation. Re-verify before relying on it;
+  see §8.
+
 Historical file hashes:
 
 | File                                | SHA-256                                                            |
@@ -96,6 +123,26 @@ Historical file hashes:
 Do not overwrite these historical values with guesses. Update them only after an explicitly authorized status refresh.
 
 ## 4. Completed Milestones
+
+### M0 — Project scaffolding
+
+Completed. Recorded retroactively during M6.0 from repository evidence; no new
+verification was performed for this entry.
+
+Scope as evidenced by commit `d7f642b` ("Add Milestone 0 implementation and
+ingestion module") and the current `src/` tree:
+
+- Project scaffolding: `package.json`, TypeScript configuration, ESLint and
+  Prettier configuration, `.editorconfig`, `.nvmrc`.
+- Express bootstrap: `src/app.ts`, `src/index.ts`, `src/server.ts`.
+- Environment validation (`src/config/`, Zod) and `.env.example`.
+- Health and readiness endpoints (`/api/health`, `/api/ready`).
+- Centralized error handling and a consistent error envelope.
+- Unit and integration test suite with coverage reporting (Vitest, Supertest).
+- Initial feed-ingestion module and SQLite persistence.
+
+No M0 acceptance report exists in this document's history; this entry records
+scope only. It makes no claim about which checks were run at the time.
 
 ### M4.0 — Specification Reconciliation
 
@@ -250,6 +297,13 @@ The following mapping was explicitly approved:
 
 Do not change this mapping without explicit user approval.
 
+**Verification status: `NOT VERIFIED`.** The three vendor identifiers above have
+not been independently verified against Google's published model catalogue, and
+no Gemini API call has been made to confirm them. This is recorded as a known
+verification risk. It does **not** assert that any identifier is invalid, and it
+does not authorize a change: the mapping above remains in force and any change
+still requires explicit Owner approval. See §6.
+
 ## 6. Outstanding Blockers and Deferred Work
 
 The following items remain unresolved. Unless a line says otherwise, each was
@@ -269,6 +323,19 @@ explicitly not resolved by M4.2 and has not been closed since.
 - Runtime integration: **completed** in M4.4 as `Runtime.getProvider()`. It is
   exposed but not called by any production path; wiring a consumer is a later
   milestone. (Was unassigned at M4.2.)
+- **Original-content retention: `NOT IMPLEMENTED` — requirement recorded only.**
+  The Owner-confirmed requirements (168-hour clock from first successful
+  download; separate storage of original content and summaries; rediscovery must
+  not reset the clock) are stated in `docs/architecture.md` under
+  _Original-content retention (planned)_. No retention behaviour exists and no
+  schema supports it yet. A new immutable first-download timestamp is a
+  prerequisite. **The deletion mechanism is pending an Owner decision.**
+- **Gemini model-ID validity: `NOT VERIFIED`.** The approved mapping in §5 uses
+  the identifiers `gemini-3.8-flash`, `gemini-3.5-flash-lite` and
+  `gemini-4-argon`. Their validity has **not** been independently verified, and
+  no Gemini API call has been made to check them. This is recorded as a known
+  verification risk only. The identifiers are **not** asserted to be invalid, and
+  the mapping must not be changed without explicit Owner approval.
 
 These items must not be silently marked as completed.
 
@@ -276,7 +343,7 @@ These items must not be silently marked as completed.
 
 ### M5.0 — PR CI Security Specification
 
-Status: **SPECIFICATION COMPLETE; VERIFICATION PENDING REVIEW.**
+Status: **SPECIFICATION COMPLETE; SPECIFICATION DELIVERABLE VERIFIED PRESENT.**
 
 M5.0 adds a _separate_ CI security objective without altering any M4.6 result.
 It defines Assertion 4-A (credential and test-transport isolation) and Assertion
@@ -284,26 +351,46 @@ It defines Assertion 4-A (credential and test-transport isolation) and Assertion
 `docs/design/i7-1b-llm-provider.md` §9.5.3.7, records the Owner's D1–D13 / G1–G2 /
 G7 decisions in §13.0a, and creates `docs/security/ci-security-model.md`.
 
+The M5.0 **deliverable** — the specification text and the security model document
+— is verified present in the merged tree. That is a statement about the presence
+of the specification, not an assessment of whether the controls it describes are
+effective.
+
 M5.0 is a **scope revision, not a finding revision.** It does not produce
 network-isolation evidence and does not discharge B-6.
 
 ### M5.1 — GitHub Actions CI Foundation
 
-Status: **IMPLEMENTED; VERIFICATION PENDING REVIEW.**
+Status: **PARTIAL — criteria 19 and 20 verified at source level; criterion 21 NOT
+VERIFIED. Not fully accepted.**
 
 Adds `.github/workflows/ci.yml`, `.github/CODEOWNERS`, and two test files
 (`tests/unit/core/llm/no-real-transport.test.ts`,
 `tests/unit/ci/workflow-policy.test.ts`). No `src/**` change is required: the
 Fake-transport seam already exists.
 
-**M5.1's workflow-declared controls are verifiable in-repository. Its repository
-settings controls are not**, and are listed as a manual checklist in
-`docs/security/ci-security-model.md` §7. Until that checklist is verified, 4-B is
-only half established.
+Per-criterion status, against the criteria in `docs/design/i7-1b-llm-provider.md`
+§12.0a:
+
+| Criterion | Subject | Status | Evidence |
+| --- | --- | --- | --- |
+| 19 | 4-A credential and test-transport isolation | **Verified at source level** | `tests/unit/core/llm/no-real-transport.test.ts` — the factory returns `FakeProvider` for an explicit fake selection with no credential; the transport seam is a throwing double that is never invoked; unknown provider and keyless `gemini` both throw rather than fall back |
+| 20 | 4-B workflow declaration boundary | **Declaration half verified** | `.github/workflows/ci.yml` — `runs-on: ubuntu-24.04`, `permissions: contents: read`, no `secrets.*`, no `id-token`, `package-manager-cache: false`, no `actions/cache`, both actions pinned to full 40-character SHAs; enforced by `tests/unit/ci/workflow-policy.test.ts` |
+| 21 | 4-B manual settings half (S1–S8) | **NOT VERIFIED** | Requires repository settings access; not observable through the Ruleset object and not read during this revision |
+
+**Criteria 19 and 20 are code-level and workflow-declaration evidence only.** They
+show what the code and the workflow file ask for. They do **not** establish
+independent security assurance, they do **not** prove what the repository
+permits, and they are **not** network-isolation evidence.
+
+**M5.1 is therefore PARTIAL, not accepted.** Its repository settings controls are
+listed as a manual checklist in `docs/security/ci-security-model.md` §7. Until
+that checklist is verified, 4-B is only half established.
 
 ### GOV-1 — Single-Maintainer Governance Model
 
-Status: **DOCUMENTATION ADOPTED; PLATFORM CONFIGURATION NOT PERFORMED.**
+Status: **GOVERNANCE TEXT ADOPTED; RULESET CONFIGURED AND VERIFIED; OTHER SECURITY
+SETTINGS NOT VERIFIED.**
 
 The Owner adopted a **Single-Maintainer Governance Model**. The project is
 independently maintained and no qualified independent technical reviewer is
@@ -328,16 +415,25 @@ currently available.
   PRs (independent review possible but not mandatory) from Owner-authored PRs
   (self-review only, with false-green CI not eliminated). See
   `docs/security/ci-security-model.md` §6.3.
-- **GitHub Ruleset configuration remains unverified and unconfigured.** It
-  requires separate authorization. S3/S4 record intended values only; no
-  required status check is active and no bypass configuration has been applied.
-- **First publication is intended to use PR-first bootstrap**, subject to
-  successful empirical validation of the first `pull_request` CI run. **No direct
-  push to `main` and no bootstrap exception is authorized.**
+- **The `main` Ruleset is now configured and verified.** Ruleset
+  `main-protection-single-maintainer` (id `27986448`) is active, targets
+  `refs/heads/main`, and carries four rules: `deletion`, `non_fast_forward`,
+  `pull_request`, and `required_status_checks`. The `pull_request` rule sets
+  required approving reviews to **0** with Code Owner review **off**; the
+  `required_status_checks` rule requires **`verify`** with
+  `strict_required_status_checks_policy: true`; the bypass actor list is
+  **empty**.
+- **S1, S2, S5, S6, S7 and S8 remain NOT VERIFIED.** They are not observable
+  through the Ruleset object and were not read. An empty bypass list is a current
+  configuration, not an immutable guarantee: the Owner retains the ability to
+  modify or delete the Ruleset.
+- **First publication used PR-first bootstrap** and is complete: PR #1 was merged
+  into `main` at `17a8c1c`. **No direct push to `main` and no bootstrap exception
+  was authorized.**
 
 GOV-1 changes governance text only. It reclassifies no finding: Assertion 4,
-B-6, O-3 and T-10a remain **BLOCKED**, and the repository has **not** been
-published.
+B-6, O-3 and T-10a remain **BLOCKED**. The active Ruleset resolves **none** of
+the network-isolation findings.
 
 ### M4.5 — Static Architecture Evidence (B-5) — accepted with audit limitations
 

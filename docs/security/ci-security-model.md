@@ -356,11 +356,31 @@ against the live repository rather than trusting a workflow declaration.
 performed by CI.** No API call in this project asserts them.
 
 **GOV-1 status of these settings.** The single-maintainer governance decision
-(GOV-1) specifies the _intended_ values for S3 and S4 above. It does **not**
-configure them. As of this document revision the `main` ruleset has **not** been
-created, **no** required status check is active, and **no** bypass configuration
-has been applied. Configuring them requires repository settings access under a
-separate authorization, and until that happens S3 and S4 remain **unverified**.
+(GOV-1) specifies the _intended_ values for S3 and S4 above. Those values have
+since been configured on the live repository, and the configuration is verified
+from the Ruleset object itself:
+
+- Ruleset `main-protection-single-maintainer` (id `27986448`) is **active**.
+- It targets branches matching `refs/heads/main` only.
+- It carries four rules: `deletion`, `non_fast_forward`, `pull_request`, and
+  `required_status_checks`.
+- The `pull_request` rule sets required approving reviews to **0**, with
+  Code Owner review **off**.
+- The `required_status_checks` rule requires the **`verify`** check with
+  `strict_required_status_checks_policy: true`.
+- The bypass actor list is **empty**.
+
+That evidence establishes **S3 and S4 as configured**. It does **not** establish
+S1, S2, S5, S6, S7 or S8: those settings are not readable through the Ruleset
+object, were not read during this documentation revision, and remain
+**NOT VERIFIED**.
+
+An empty bypass actor list is a **current configuration**, not an immutable
+guarantee. The repository Owner retains the ability to modify or delete the
+ruleset, so S4 remains a behavioural commitment as described in the table above.
+
+The active ruleset resolves **none** of the network-isolation findings. N-1, N-2,
+Assertion 4, B-6, O-3 and T-10a remain **BLOCKED**, exactly as recorded in §6.
 
 ---
 
