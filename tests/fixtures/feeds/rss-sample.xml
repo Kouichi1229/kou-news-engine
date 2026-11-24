@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>Example RSS Feed</title>
+    <link>https://example.com/</link>
+    <description>A sample RSS 2.0 feed.</description>
+    <language>en</language>
+    <item>
+      <title>First Post</title>
+      <link>https://example.com/posts/first</link>
+      <description>&lt;p&gt;First summary with &amp;amp; entity&lt;/p&gt;</description>
+      <pubDate>Wed, 19 Nov 2026 10:00:00 GMT</pubDate>
+      <guid isPermaLink="false">post-1</guid>
+      <dc:creator>Alice</dc:creator>
+      <category>Research</category>
+      <category>AI</category>
+      <media:content url="https://example.com/images/first.png"/>
+    </item>
+    <item>
+      <title>Second Post</title>
+      <link>https://example.com/posts/second?utm_source=rss&amp;utm_medium=feed&amp;id=2</link>
+      <description>Second summary</description>
+      <pubDate>Thu, 20 Nov 2026 12:30:00 GMT</pubDate>
+      <guid isPermaLink="false">post-2</guid>
+      <category>AI</category>
+    </item>
+    <item>
+      <title>Third Post Without Date</title>
+      <link>https://example.com/posts/third</link>
+      <description>Undated summary</description>
+      <guid isPermaLink="false">post-3</guid>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,98 @@
+# CI — PR and main-branch validation.
+#
+# Triggers: `pull_request` (untrusted, Class A — external fork contributors) and
+# `push` to `main` (trusted, Class B — repository write collaborators). Both
+# workloads share this one job; the security guarantees below are stated for the
+# untrusted `pull_request` workload, and neither workload establishes network
+# isolation. See design §9.5.3.7 and ci-security-model.md §4-B.
+#
+# Security model: docs/security/ci-security-model.md
+#   Assertion 4-A (credential/transport isolation), Assertion 4-B (boundary).
+#
+# Every control declared here is a *declaration*. It proves what this workflow
+# asks for, not what the repository permits. Repository settings are a manual
+# checklist (docs/security/ci-security-model.md §7) and are NOT verified here.
+#
+# This workflow establishes NO network isolation. External egress is permitted
+# by design (D5) and Assertion 4 / B-6 / O-3 / T-10a remain BLOCKED.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege (D6). `contents: read` is the ceiling; no write scopes and no
+# `id-token` anywhere in this file. A workflow-level block cannot *raise* the
+# repository default, so D6 additionally requires the repository setting
+# "Workflow permissions = Read repository contents".
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify
+    # GitHub-hosted, VM-backed (D10). Never `ubuntu-latest`, `ubuntu-slim`
+    # (1-CPU runners are hosted in a container on a shared VM), or a
+    # self-hosted or persistent runner.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      # actions/checkout v5.1.0
+      # SHA verified 2026-11-18 via GitHub API: ref refs/tags/v5.1.0 is an
+      # object of type "commit"; commit signature verified=true (valid).
+      # Purpose: fetch the PR head into the workspace.
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          # Do not leave the token in the local git config. The job has no
+          # write scope, but not persisting the credential keeps it out of
+          # reach of anything the PR's own code might run later.
+          persist-credentials: false
+
+      # actions/setup-node v7.1.0
+      # SHA verified 2026-11-18 via GitHub API: ref refs/tags/v7.1.0 is an
+      # object of type "commit"; commit signature verified=true (valid).
+      # Purpose: provision Node 24, matching .nvmrc.
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: .nvmrc
+          # D13, first switch: disable *automatic* package-manager caching.
+          package-manager-cache: false
+          # D13, second switch: an explicit `cache` input would enable caching
+          # *independently* of package-manager-cache, so it is deliberately
+          # absent. Do not add it.
+          #
+          # No `registry-url` either: it would write an .npmrc and pull in
+          # NODE_AUTH_TOKEN handling that this job has no use for.
+
+      # Ordinary install (D9). Lifecycle scripts may execute (accepted: R2).
+      # Deliberately NOT `--ignore-scripts`, which breaks packages that need a
+      # build step, and NOT `--omit=dev`, because the test toolchain is a
+      # devDependency.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      # Fake/Mock Gemini transport is mandatory (D fork-PR transport rule).
+      # The value is set explicitly rather than relying on the application
+      # default, so the isolation is a property of this workflow and not an
+      # incidental consequence of env.ts.
+      - name: Test
+        run: npm test
+        env:
+          LLM_PROVIDER: fake
+          # GEMINI_API_KEY is intentionally absent. 4-A depends on its absence,
+          # and no secret is referenced anywhere in this file.

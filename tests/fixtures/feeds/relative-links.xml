@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Relative Links Feed</title>
+    <link>https://example.com/blog/feed.xml</link>
+    <item>
+      <title>Absolute Link</title>
+      <link>https://example.com/posts/absolute</link>
+      <guid>rel-1</guid>
+    </item>
+    <item>
+      <title>Root Relative Link</title>
+      <link>/posts/root-relative</link>
+      <guid>rel-2</guid>
+    </item>
+    <item>
+      <title>Path Relative Link</title>
+      <link>posts/path-relative</link>
+      <guid>rel-3</guid>
+    </item>
+    <item>
+      <title>Protocol Relative Link</title>
+      <link>//cdn.example.com/posts/protocol-relative</link>
+      <guid>rel-4</guid>
+    </item>
+    <item>
+      <title>Javascript Scheme Link</title>
+      <link>javascript:alert(1)</link>
+      <guid>rel-5</guid>
+    </item>
+    <item>
+      <title>Data Scheme Link</title>
+      <link>data:text/html,hello</link>
+      <guid>rel-6</guid>
+    </item>
+    <item>
+      <title>Mailto Scheme Link</title>
+      <link>mailto:someone@example.com</link>
+      <guid>rel-7</guid>
+    </item>
+    <item>
+      <title>Empty Link</title>
+      <link></link>
+      <guid>rel-8</guid>
+    </item>
+    <item>
+      <title>Missing Link</title>
+      <guid>rel-9</guid>
+    </item>
+  </channel>
+</rss>
