@@ -1,0 +1,61 @@
+# CODEOWNERS — security-sensitive paths.
+#
+# Security model: docs/security/ci-security-model.md (D7, D11)
+#
+# IMPORTANT — what this file does and does not do:
+#
+#   * It does NOT prevent a pull request from executing. Workflows from
+#     first-time external fork contributors require manual approval before they
+#     run (D2, Option B); same-repository pull requests are not gated. Approval
+#     authorizes workflow execution only, not acceptance or merge.
+#   * It does NOT enforce anything by itself. GitHub only requests Code Owner
+#     review when branch protection or a ruleset on the target branch is
+#     configured to require it.
+#   * It does NOT replace human review. It routes review to the right person.
+#
+# Effective enforcement therefore requires the repository settings in
+# docs/security/ci-security-model.md §7. Those settings are NOT changeable from
+# a repository file and were NOT changed by M5.0 or M5.1.
+#
+# Single-maintainer governance (GOV-1). This file is retained as *ownership and
+# responsibility metadata*: it names who is accountable for each sensitive path.
+# It does NOT gate merges on its own, and mandatory Code Owner approval is
+# DISABLED while the project has only one maintainer. With a single owner, a
+# mandatory Code Owner approval is unsatisfiable: the platform forbids authors
+# approving their own pull requests.
+#
+# What replaces it: security-sensitive changes must receive an explicit Owner
+# self-review before merge, recorded in the pull request description (what was
+# reviewed; what verification was performed and observed; what was not verified;
+# and an acknowledgement that the review was self-review, not independent
+# review). Self-review is NOT independent review and must never be described as
+# such. The same Owner can modify both a workflow and the tests that validate it,
+# so self-review plus CI do not eliminate false-green CI (residual risk R3).
+#
+# Mandatory Code Owner approval is deferred, not abolished. It is to be
+# re-enabled when a qualified independent reviewer becomes available; that
+# reviewer must then be added to the rules below.
+
+# CODEOWNERS must cover itself. If it did not, the protection it provides
+# could be removed by the very pull request it is meant to gate.
+/.github/CODEOWNERS          @Kouichi1229
+
+# CI workflow definitions: the primary security-sensitive surface. Editing
+# these changes the trust boundary itself.
+/.github/workflows/          @Kouichi1229
+
+# The CI security model and its normative specification.
+/docs/security/              @Kouichi1229
+/docs/design/i7-1b-llm-provider.md  @Kouichi1229
+
+# Tests that carry security assertions. A pull request that weakens these tests
+# weakens the evidence, so they are reviewed like the controls they verify.
+/tests/unit/ci/              @Kouichi1229
+/tests/unit/core/llm/        @Kouichi1229
+/tests/helpers/architecture-scan.ts  @Kouichi1229
+
+# Dependency and build inputs: the supply-chain surface (R2, R8).
+/package.json                @Kouichi1229
+/package-lock.json           @Kouichi1229
+/Dockerfile                  @Kouichi1229
+/compose.yaml                @Kouichi1229

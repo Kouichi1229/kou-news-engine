@@ -1,6 +1,6 @@
 # Kou News Engine — Project Status & Handoff
 
-Last updated: 2026-11-22 (post-M4.4 acceptance; documentation revision)
+Last updated: 2026-11-18 (M5.0-R2: Owner M4.5 decision recorded, decision numbering and cross-references corrected; verification pending review. GOV-1: Single-Maintainer Governance Model adopted as documentation — platform configuration not performed)
 
 ## 1. Purpose
 
@@ -257,6 +257,11 @@ explicitly not resolved by M4.2 and has not been closed since.
 
 - T-10a assertion 4: BLOCKED.
 - B-6: BLOCKED.
+- O-3: BLOCKED (whether N-1 egress denial is available).
+- Network isolation evidence (N-1 / N-2): **not established.**
+- B-5: `OPEN — implementation`. **Not** closed by the M4.5 acceptance; requires
+  separate evidence-based reconciliation (see §7).
+- M4.5 audit limitations: **preserved, not discharged** by acceptance — see §7.
 - T-16c, T-17, T-18: assigned to M4.7.
 - Gemini Provider Factory wiring: **completed** in M4.3 — the `gemini` branch of
   `createProvider` now validates the key and transport seam and constructs
@@ -269,15 +274,95 @@ These items must not be silently marked as completed.
 
 ## 7. Current Next Milestone
 
-### M4.5 — Static Architecture Evidence (B-5)
+### M5.0 — PR CI Security Specification
 
-Status: **NOT STARTED.** No specification preflight, no design revision, and no
-implementation has begun.
+Status: **SPECIFICATION COMPLETE; VERIFICATION PENDING REVIEW.**
+
+M5.0 adds a _separate_ CI security objective without altering any M4.6 result.
+It defines Assertion 4-A (credential and test-transport isolation) and Assertion
+4-B (untrusted fork PR execution boundary) in
+`docs/design/i7-1b-llm-provider.md` §9.5.3.7, records the Owner's D1–D13 / G1–G2 /
+G7 decisions in §13.0a, and creates `docs/security/ci-security-model.md`.
+
+M5.0 is a **scope revision, not a finding revision.** It does not produce
+network-isolation evidence and does not discharge B-6.
+
+### M5.1 — GitHub Actions CI Foundation
+
+Status: **IMPLEMENTED; VERIFICATION PENDING REVIEW.**
+
+Adds `.github/workflows/ci.yml`, `.github/CODEOWNERS`, and two test files
+(`tests/unit/core/llm/no-real-transport.test.ts`,
+`tests/unit/ci/workflow-policy.test.ts`). No `src/**` change is required: the
+Fake-transport seam already exists.
+
+**M5.1's workflow-declared controls are verifiable in-repository. Its repository
+settings controls are not**, and are listed as a manual checklist in
+`docs/security/ci-security-model.md` §7. Until that checklist is verified, 4-B is
+only half established.
+
+### GOV-1 — Single-Maintainer Governance Model
+
+Status: **DOCUMENTATION ADOPTED; PLATFORM CONFIGURATION NOT PERFORMED.**
+
+The Owner adopted a **Single-Maintainer Governance Model**. The project is
+independently maintained and no qualified independent technical reviewer is
+currently available.
+
+- **D7 and D8 are superseded** for the sole-owner case by the Owner-approved
+  policy recorded in `docs/design/i7-1b-llm-provider.md` §13.0a. The previous
+  "defer rather than self-approve" disposition no longer governs that case.
+- **`.github/CODEOWNERS` is retained as ownership and responsibility metadata.**
+  Mandatory Code Owner approval is **deferred, not abolished**, and is to be
+  reconsidered when a qualified independent reviewer becomes available.
+- **Owner self-review plus required CI are the normal merge prerequisites.** The
+  Owner may merge their own PR through the normal configured merge path with
+  required approving reviews at **zero**. Administrator bypass is not the routine
+  mechanism, and the bypass list is intended to remain empty.
+- **Self-review is not independent review** and must never be described as such.
+  A self-review record is required in the PR description for CODEOWNERS-listed
+  paths. This is a maintainer operating procedure; GitHub Rulesets do **not**
+  natively enforce PR description content.
+- **R3 keeps its existing rating and acceptance status.** Only its mitigation and
+  residual-risk descriptions were corrected, to distinguish external-contributor
+  PRs (independent review possible but not mandatory) from Owner-authored PRs
+  (self-review only, with false-green CI not eliminated). See
+  `docs/security/ci-security-model.md` §6.3.
+- **GitHub Ruleset configuration remains unverified and unconfigured.** It
+  requires separate authorization. S3/S4 record intended values only; no
+  required status check is active and no bypass configuration has been applied.
+- **First publication is intended to use PR-first bootstrap**, subject to
+  successful empirical validation of the first `pull_request` CI run. **No direct
+  push to `main` and no bootstrap exception is authorized.**
+
+GOV-1 changes governance text only. It reclassifies no finding: Assertion 4,
+B-6, O-3 and T-10a remain **BLOCKED**, and the repository has **not** been
+published.
+
+### M4.5 — Static Architecture Evidence (B-5) — accepted with audit limitations
+
+Status: **ACCEPTED WITH AUDIT LIMITATIONS** (Owner decision, M5.0-R2).
+
+The milestone is accepted. The acceptance is **scoped**: it is not unconditional,
+not a full verification, and not free of audit limitations. The preserved
+limitations are recorded in `docs/design/i7-1b-llm-provider.md` §11.5.4a:
+
+1. Historical byte-level provenance of the design document was not established.
+2. N19 does not independently detect an edge-kind-only deduplication mutation.
+3. N21 lacks a non-empty guard, allowing vacuous success if `expressEdges` is empty.
+4. Historical unauthorized Git restoration and test-helper mutation incidents
+   remain part of the audit history; final hashes do not prove exact historical
+   recovery.
+5. The previously identified formatting discrepancy remains an audit limitation.
 
 Per the design document (§11.5), M4.5 depends on M4.2 and M4.4 and stops if a bare
-specifier cannot be justified. It is not authorized by this document.
+specifier cannot be justified.
 
-M4.5 must not be inferred as authorized from M4.4's acceptance.
+**M4.5 acceptance does not close B-5.** B-5 remains `OPEN — implementation` and
+requires separate, evidence-based reconciliation against the allow-list artifact.
+The milestone acceptance is a decision about the *milestone*; B-5 is a condition
+about the *evidence*. See `docs/design/i7-1b-llm-provider.md` §11.2.1 and §11.5.4a.
+Do not infer `RESOLVED` for B-5 from this acceptance.
 
 <details>
 <summary>Historical: M4.3 candidate specification preflight (superseded)</summary>

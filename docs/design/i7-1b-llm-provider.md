@@ -1,7 +1,19 @@
 # I7-1b — LLM Provider Abstraction: Design Specification
 
 Status: **Phases 1–4 implemented (uncommitted) and reviewed through M4.4 acceptance;
-M4.5–M4.7 not started.** B-6 remains BLOCKED (see the table below).
+M4.5 accepted with audit limitations; M4.6–M4.7 not started.** B-6 remains BLOCKED
+(see the table below).
+
+**M4.5 is `ACCEPTED WITH AUDIT LIMITATIONS`** by Owner decision (§11.5.4a). The
+acceptance is scoped: it closes the *milestone*, not the audit limitations, and it
+does not close **B-5**, which remains `OPEN — implementation` and requires separate
+evidence-based reconciliation (§11.2.1).
+
+**M5.0 adds a separate CI security objective (§9.5.3.7) without altering any M4.6
+result.** Assertion 4, B-6, O-3 and T-10a remain BLOCKED. M5.0 is a scope revision,
+not a finding revision: it lowers what ordinary PR CI must prove, and produces no
+network-isolation evidence. See `docs/security/ci-security-model.md`.
+
 Audience: whoever implements I7-1b and reviews the resulting PR.
 
 This document specifies a provider-agnostic LLM layer. Section 2 separates what
@@ -22,6 +34,7 @@ plan for a fact.
 | Gemini transport (`gemini.transport.ts`)       | **Implemented, not committed** (M4.1) — `node:https` request, no SDK. Specified in §11.1.5                                                                                     |
 | `createProvider` factory                       | **Exists**; the `gemini` branch validates the key and transport seam, then lazily constructs `GeminiProvider` (M4.3). Stages specified in §11.3.2                              |
 | Network isolation evidence (B-6)               | **BLOCKED** — no N-1 and no complete N-2 (Section 11.2.2)                                                                                                                      |
+| PR CI security objective (M5.0: 4-A / 4-B)     | **SPECIFIED, NOT IMPLEMENTED** — §9.5.3.7. Separate from Assertion 4; establishes no network isolation.                                                                        |
 
 "Implemented" here means present in the working tree and reviewed. Nothing in
 Phases 1–2 has been committed, released or deployed.
@@ -1086,7 +1099,7 @@ below reaches the network, and none is permitted to be weakened to obtain a pass
 | **Security property verified**  | Single egress; no hidden socket                                                                                                                                                                                | No eager credential or vendor initialisation                                                                                                                     | A hung socket cannot outlive its deadline                                          | Cancellation actually stops work                                 |
 | **External network**            | **No**                                                                                                                                                                                                         | **No**                                                                                                                                                           | **No**                                                                             | **No**                                                           |
 | **Fake transport allowed**      | **Required**                                                                                                                                                                                                   | Not used                                                                                                                                                         | **Required**                                                                       | **Required**                                                     |
-| **Process-level egress denial** | **Required** for assertion 4 (currently BLOCKED)                                                                                                                                                               | Not required                                                                                                                                                     | Not required                                                                       | Not required                                                     |
+| **Process-level egress denial** | **Required** for assertion 4 (currently BLOCKED — unchanged by M5.0). Not required for the M5.0 PR CI objective (§9.5.3.7), which makes no network-isolation claim                       | Not required                                                                                                                                                     | Not required                                                                       | Not required                                                     |
 
 | Field                           | **T-16a**                                                           | **T-16b**                                                               | **T-16c**                                                                                 | **T-17**                                                        | **T-18**                                                                        |
 | ------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------- |
@@ -2569,6 +2582,128 @@ depend on hooking the same runtime the code uses. N-2 is the fallback for local 
 single-process runs, and only under the conditions above. Whichever is used is named
 in the T-10a test file, together with the coverage table result, so the evidence is
 auditable rather than asserted.
+
+#### 9.5.3.7 M5.0 PR CI security objective: assertions 4-A and 4-B
+
+**Status: specified, not implemented.** This subsection defines a *separate*
+objective for ordinary pull-request CI. It does **not** modify §9.5.3.6, does not
+resolve B-6, and does not produce assertion-4 evidence. The decision rule above
+continues to govern T-10a unchanged.
+
+##### Why a second objective exists
+
+The original Assertion 4 requires that no external socket is opened during T-10a.
+Satisfying it requires N-1 or a complete N-2, neither of which exists in this
+environment. That requirement remains BLOCKED (§11.2.2) and is not waived.
+
+Ordinary PR CI has a different and narrower need: a pull request from an
+untrusted person must not be able to reach a real Gemini credential, and must not
+run with repository write privilege. That need can be met with controls that are
+available today, and it is worth stating precisely rather than leaving implied.
+
+The two objectives are therefore recorded separately so that neither is mistaken
+for the other.
+
+##### Assertion 4-A — Credential and test-transport isolation
+
+**Guarantees:**
+
+1. Fork PR test execution receives **no valid Gemini API credential** and no valid
+   internal service credential.
+2. The **Fake/Mock Gemini transport is explicitly selected**.
+3. Fake transport injection is **verified** by test.
+4. There is **no silent fallback** to the real Gemini transport.
+5. The Fork PR test path **does not construct** the real Gemini transport.
+
+**Explicitly NOT established by 4-A:**
+
+- That no external HTTP request occurs.
+- That no outbound network access occurs.
+- That no external data disclosure occurs.
+- That an unauthenticated network request is impossible.
+
+Credential absence, transport non-construction and network isolation are **three
+different properties**. 4-A establishes the first two only. A process holding no
+credential can still open a socket, so 4-A must never be cited as network-isolation
+evidence.
+
+##### Assertion 4-B — CI execution and permission boundary
+
+**Scope of the workload.** 4-B covers two distinct workloads that share one
+workflow, and it must not be read as a fork-only statement:
+
+| Workload | Trigger | Contributor class | Trust |
+| --- | --- | --- | --- |
+| **Untrusted PR validation** | `pull_request` | Class A — external fork contributors | **Untrusted** |
+| **Trusted main validation** | `push` to `main` | Class B — repository write collaborators | **Trusted** |
+
+The 4-B guarantees below are the boundary that applies to the **untrusted** `pull_request`
+workload. The `push`-to-`main` workload runs the same job, but with a trusted
+author and a token scoped to a post-merge commit. Neither workload is a fork-only
+guarantee, and neither establishes N-1 network isolation.
+
+**Guarantees (untrusted `pull_request` workload):**
+
+1. GitHub-hosted `ubuntu-24.04`; no `ubuntu-latest`, self-hosted, or persistent runner (D10).
+2. Read-only `GITHUB_TOKEN`.
+3. No `contents: write`, `pull-requests: write`, or `id-token: write`.
+4. No fork PR write-token exception enabled.
+5. No valid Gemini or internal service credentials injected into fork PR jobs (D11).
+6. External network access **is accepted** at this project stage.
+7. Fork PR workflows from **first-time external fork contributors** require
+   manual approval before they run (D2, Option B). That gate applies to
+   first-time external contributors only: it is not a blanket requirement on
+   all external contributors, and it does not apply to same-repository pull
+   requests. Approval to run is a workflow-execution decision, not acceptance
+   or merge of the pull request.
+
+**4-B is not N-1 process-level network isolation.** It is a privilege and
+credential boundary. Item 6 is a stated property of the current posture, not a
+gap that 4-B closes. The trusted `push` workload does not change this: a
+post-merge run is not evidence of egress denial either.
+
+##### Evidence boundary
+
+Code-level evidence and platform/settings evidence are distinct and not
+interchangeable:
+
+| Kind | Source | Independent of the PR author? |
+| --- | --- | --- |
+| Code-level | Tests, static scans, transport assertions | **No.** Runs inside PR-controlled code |
+| Platform / settings | Runner labels, event type, repository settings | **Partially.** Metadata is platform-side; effective token permissions are not exposed by any API |
+
+A malicious PR author may modify the tests, the scanners, the transport-injection
+code, the workflow declarations and the fixtures **in the same pull request**.
+Consequently:
+
+- 4-A's tests are **self-reported**, not tamper-resistant.
+- A workflow declaration on the base branch is **not proof** of the workflow that
+  actually executed for a given PR.
+- **No external verifier exists in this project.** This is recorded as a
+  limitation, not a risk to be mitigated later.
+
+The only genuinely independent control is human review before merge, and even
+that does not protect a PR execution that has already occurred. Human review is
+**independent only when the reviewer and the PR author are different people**.
+For an **Owner-authored PR** the Owner is both author and reviewer, so that
+review is **self-review, not independent review** (Section 13.0a). Local
+evidence — tests, scans, recorded hashes, retained CI output — improves
+**traceability**, but it does **not substitute for reviewer independence**.
+
+##### Evidence standard
+
+4-A and 4-B are satisfied by:
+
+- 4-A: code-level tests in `tests/unit/core/llm/` asserting fake selection, seam
+  non-invocation and absence of fallback.
+- 4-B: workflow declarations plus a static policy test
+  (`tests/unit/ci/workflow-policy.test.ts`), **together with** manual
+  verification of the repository settings listed in
+  `docs/security/ci-security-model.md` §7.
+
+Repository settings **cannot** be established by workflow declarations. A
+`permissions:` block can only reduce the token; it cannot prove the repository
+default is restrictive.
 
 #### 9.5.4 One injection path, shared by production and tests
 
@@ -4368,6 +4503,13 @@ gates a claim the document would otherwise make without evidence.
 | B-5 | Both static parts are computed and their allow-lists recorded: the adapter closure (9.5.3.1) **and** the production composition path (9.5.3.3a)          | T-10a assertion 5            |
 | B-6 | Assertion 4 has an evidence mechanism that meets the bar: N-1 available, **or** N-2 with a fully accounted coverage table (Section 9.5.3.6)              | T-10a assertion 4            |
 
+> **M5.0 scope note (does not change this definition).** B-6 remains the correct
+> gate for the original Assertion 4. M5.0 introduces a *separate* objective for
+> ordinary PR CI (§9.5.3.7) that does not require process-level egress denial.
+> B-6 is therefore **historical-only** with respect to ordinary PR CI, and stays
+> in force for any future work that genuinely requires process-level network
+> isolation. **It is not resolved, retired as a finding, or marked PASS.**
+
 #### 11.2.1 Status after M4.0 and M4.0.1
 
 M4.0 and M4.0.1 are specification phases. They resolve the conditions that are
@@ -4389,6 +4531,25 @@ to RESOLVED. B-6 in particular is untouched (§11.2.2).
 
 **B-6 remains the single hard blocker.** It is not resolved by this document, and
 this document does not claim it is.
+
+**B-5 remains `OPEN — implementation`, and this is deliberate.** The Owner has
+accepted M4.5 as `ACCEPTED WITH AUDIT LIMITATIONS` (§11.5.4a), but B-5 is an
+**independent implementation/tracking obligation**, not a synonym for milestone
+acceptance. The two records are distinct:
+
+- **M4.5 milestone acceptance** records that the evidence work was reviewed and
+  accepted, subject to the audit limitations in §11.5.4a. It is a decision about
+  the *milestone*.
+- **B-5** records whether the two allow-lists are computed and recorded to the
+  standard of §9.5.3.1 and §9.5.3.3a. It is a condition about the *evidence*.
+
+The milestone acceptance does **not** close B-5 by implication, and B-5 is not
+reopened as a blocker by the acceptance either. **B-5 requires separate,
+evidence-based reconciliation** against the allow-list artifact
+(`tests/fixtures/llm-architecture-allowlist.ts`, §9.5.3.5a) before its status can
+change. No such reconciliation is performed by M4.5, M5.0 or M5.1, and this
+document does not assume one. A reader must not infer B-5 `RESOLVED` from
+`ACCEPTED WITH AUDIT LIMITATIONS`.
 
 #### 11.2.2 B-6 network isolation: decision and current evidence (Q-4)
 
@@ -4537,7 +4698,7 @@ specific implementation choice.
 | --- | ------------------------------------------------------------------------------------------------------------ | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | O-1 | Ratify the proposed model mapping in §11.1.1 (`gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-4-argon`) | B-4 closure and M4.2    | **RATIFIED (M4.2 reconciliation)** — the three ids are approved exactly as listed; see §11.1.1                                    |
 | O-2 | `temperature` policy given §11.1.2                                                                           | M4.2 request mapping    | **RESOLVED (spec)** — never sent; see §11.1.2 and §11.6.5.1                                                                       |
-| O-3 | Whether N-1 egress denial is available; otherwise approve the N-2 extension work                             | B-6 / T-10a assertion 4 | **BLOCKED** — unchanged by M4.0.1 and M4.0.2                                                                                      |
+| O-3 | Whether N-1 egress denial is available; otherwise approve the N-2 extension work                             | B-6 / T-10a assertion 4 | **BLOCKED** — unchanged by M4.0.1, M4.0.2 and M5.0. M5.0 does not supersede O-3; the M5 PR CI objective (§9.5.3.7) is a separate requirement |
 | O-4 | Whether to adopt the Interactions surface instead of `generateContent`                                       | §11.1.3                 | **RESOLVED (recommendation)** — Interactions API adopted; see §11.6.12                                                            |
 | O-5 | Whether deployment requires an egress proxy                                                                  | M4.1 transport          | **APPROVED** — direct HTTPS, no proxy support, deployment must provide egress control (§11.6.9)                                   |
 | O-6 | Whether DNS pinning for the fixed vendor host is in scope                                                    | Optional hardening      | **PROPOSED** — deferred, path named (§11.6.10)                                                                                    |
@@ -4578,9 +4739,11 @@ green.
 | M4.2       | Adapter implementation (`/v1/interactions`) + `gemini.provider.test.ts` | M4.1, O-1 (ratified), O-2 | Adapter needs a networking import                        |
 | M4.3       | Factory wiring (§11.3.2)                                                | M4.2                      | Unintended Phase 2 product behaviour changes (§11.5.2)   |
 | M4.4       | Runtime lazy composition (§11.1.8, §11.5.3)                             | M4.3                      | Sync/async cannot be reconciled (none expected)          |
-| M4.5       | Static architecture evidence (B-5), §11.5.4                             | M4.2, M4.4                | A bare specifier cannot be justified                     |
+| M4.5       | Static architecture evidence (B-5), §11.5.4                             | M4.2, M4.4                | **ACCEPTED WITH AUDIT LIMITATIONS** (§11.5.4a); stop condition was "a bare specifier cannot be justified" |
 | M4.6       | Network isolation evidence (B-6)                                        | O-3                       | Neither N-1 nor complete N-2 → assertion 4 stays BLOCKED |
 | M4.7       | Integration, gates, T-16a/b/c, T-17, T-18                               | M4.1–M4.6                 | Any gate red                                             |
+| **M5.0**   | PR CI security specification (§9.5.3.7) — **does not touch M4.6**        | —                         | —                                                        |
+| **M5.1**   | GitHub Actions CI foundation (workflow, CODEOWNERS, policy tests)        | M5.0                      | Policy test or settings audit fails                      |
 
 M4.1 no longer depends on O-3: choosing the interface does not resolve network
 isolation, and gating transport work on it would conflate two independent problems.
@@ -5032,9 +5195,11 @@ ESLint, and Prettier `--check`. This section records a specification, not a resu
 
 #### 11.5.4 M4.5 static architecture evidence responsibilities
 
-M4.5 closes blocking condition **B-5** (§11.2) by computing both static analyses
-defined in §9.5.3.1 and §9.5.3.3a and recording their allow-lists. It satisfies
-**T-10a assertion 5** and nothing else.
+M4.5 is the milestone responsible for blocking condition **B-5** (§11.2): it
+computes both static analyses defined in §9.5.3.1 and §9.5.3.3a and records
+their allow-lists. It satisfies **T-10a assertion 5** and nothing else. B-5's
+own status is tracked separately in §11.2.1 and remains `OPEN — implementation`;
+nothing in this section closes it.
 
 **A. Responsibility and boundaries.**
 
@@ -5518,6 +5683,45 @@ expression, and distinguishing a declaration edge from a reference edge — are
 symbol and reference information, not a bare parse tree plus textual matching. A
 scanner that pattern-matched identifiers would satisfy the syntax and fail the
 semantics these controls exist to test.
+
+#### 11.5.4a M4.5 Owner acceptance and preserved audit limitations
+
+**Owner decision: M4.5 is `ACCEPTED WITH AUDIT LIMITATIONS`.**
+
+This closes the **milestone**. It is **not** an unconditional acceptance, not a
+finding revision, and not a claim that the evidence is free of limitations. The
+limitations below are part of the audit record and are preserved verbatim in
+substance. They remain open, and a future reader must not treat this acceptance as
+having discharged them.
+
+**What the acceptance does NOT close:**
+
+1. **Historical byte-level provenance of this design document was not
+   established.** The exact historical bytes were never proven. An acceptance
+   decision does not retroactively create that proof.
+2. **N19 does not independently detect an edge-kind-only deduplication mutation.**
+   The N19 control (§11.5.4) demonstrates that two edges distinguished only by
+   *kind* survive as separate rows, but it does not isolate a scanner that
+   deduplicates on kind alone, so the control is narrower than an independent
+   proof of the edge-cardinality rule.
+3. **N21 lacks a non-empty guard.** The N21 control asserts that every `express`
+   edge is `type-only`, but asserts nothing about the set being non-empty.
+   If `expressEdges` were empty the assertion would pass vacuously. The control is
+   therefore susceptible to vacuous success as written.
+4. **Historical unauthorized Git restoration and test-helper mutation incidents
+   remain part of the audit history.** Final hashes do not prove exact historical
+   recovery. Clean current state is not evidence that no intermediate
+   unauthorised modification occurred.
+5. **The previously identified formatting discrepancy remains an audit
+   limitation.** It was not resolved by acceptance, and resolving it is not part
+   of M5.0.
+
+**B-5 is not closed by this acceptance.** B-5 remains `OPEN — implementation`
+(§11.2.1) and requires separate, evidence-based reconciliation. The milestone
+acceptance and the B-5 status are distinct records; see §11.2.1.
+
+M4.6 Assertion 4, B-6, O-3 and T-10a remain **BLOCKED**. M4.5 establishes nothing
+about process-level network isolation.
 
 ### 11.6 API interface re-evaluation: Interactions API vs `generateContent` (M4.0.1)
 
@@ -6626,6 +6830,33 @@ makes no claim about consumer independence.
     `tests/unit/core/llm/` tests remain green; M4.4 must not weaken them to obtain a
     pass. — T-20, T-21, T-22, T-23
 
+### 12.0a M5.0 PR CI acceptance criteria (separate from criteria 1–18)
+
+These are **not** I7-1b completion criteria and do not affect the 29 in-scope
+tests. They gate the M5.0/M5.1 PR CI objective only (§9.5.3.7), and they
+**cannot** discharge criteria involving Assertion 4.
+
+19. **4-A — credential and test-transport isolation.** With `LLM_PROVIDER=fake`
+    and no `GEMINI_API_KEY` present, the factory returns a `FakeProvider`; a
+    supplied `createTransport` callback is invoked **0 times**; no silent fallback
+    to a real transport occurs on any path (unknown provider throws; a
+    `gemini` selection without a key throws). — `tests/unit/core/llm/no-real-transport.test.ts`
+20. **4-B — workflow boundary.** The CI workflow declares
+    `runs-on: ubuntu-24.04`, `permissions: contents: read`, no `secrets.*`, no
+    `id-token`, no `contents: write` or `pull-requests: write`, no
+    `actions/cache`, `package-manager-cache: false`, no explicit `cache` input,
+    only official actions pinned to full 40-character SHAs, and no artifact
+    transfer between jobs. — `tests/unit/ci/workflow-policy.test.ts`
+21. **4-B — settings half is manual.** Criterion 20 is a *declaration* check. It
+    proves what the workflow asks for, not what the repository permits. The
+    settings in `docs/security/ci-security-model.md` §7 must be verified by hand
+    and are recorded as **not verified by CI**.
+
+> **Explicit non-claim.** Criteria 19–21 establish credential absence and a
+> privilege boundary. They do **not** establish that no external request occurs,
+> and they are **not** N-1 or N-2 network-isolation evidence. Assertion 4, B-6,
+> O-3 and T-10a remain BLOCKED.
+
 ### 12.1 T-ID → Phase → Acceptance criterion
 
 | Test  | Phase      | Acceptance criterion |
@@ -6669,6 +6900,24 @@ proven by T-19. T-12 and T-15 are listed for completeness, are marked deferred, 
 deliberately map to no criterion — they carry no acceptance criterion because I7-1b
 does not run them.
 
+**Criteria 19–21 have no T-ID, and none is assigned.** They were added by M5.0 and
+are outside the Phase 1–4 T-ID registry above, so mapping them to a `T-` row would
+misrepresent that registry's scope. Their evidence is named inline in each
+criterion instead:
+
+| Criterion | Evidence | Qualifying T-ID |
+| --- | --- | --- |
+| 19 (4-A) | `tests/unit/core/llm/no-real-transport.test.ts` | none in this registry |
+| 20 (4-B, declaration half) | `tests/unit/ci/workflow-policy.test.ts` | none in this registry |
+| 21 (4-B, settings half) | manual verification of `ci-security-model.md` §7 | **none exists, and none can**: repository settings are not observable from any in-repo test |
+
+Neither M5.1 test is independent evidence. Both read PR-controlled files and run
+inside PR-controlled code, so a pull request that weakens a test also weakens the
+evidence it carries (security model §4.1). Criterion 20 proves only what the
+workflow *declares*; it proves nothing about effective GitHub Repository Settings.
+Criterion 21 is therefore recorded as **unverified by CI**, with no test standing
+in for it.
+
 | Scope      | Count |
 | ---------- | ----: |
 | In scope   |    29 |
@@ -6692,8 +6941,87 @@ them, and they are not to be reopened as open questions.
 | D-6 | Structured output           | Not supported in V1. Text in, text out. Revisited only on concrete business need.                                                        | 1.2              |
 | D-7 | Token usage when unreported | `null`, never `0`, so "not reported" is distinguishable from "used nothing".                                                             | 4.2              |
 
-### 13.1 Still open
+### 13.0a M5.0 Owner-approved CI security decisions (D1–D13, G1/G2, G7)
 
+**Numbering note.** The `D-1`..`D-7` entries in the table above are pre-existing
+*LLM design* decisions. The `D1`..`D13` entries below are *CI security* decisions
+approved under M5.0. The two numbering series are distinct and independent; the
+hyphenation differs deliberately so the series are not conflated.
+
+Approved by the Owner and recorded here as authoritative project requirements.
+
+| # | Decision | Approved outcome |
+| --- | --- | --- |
+| D1 | External fork contributor trust | **Untrusted.** Must use `pull_request`. |
+| D2 | Fork PR execution approval | **Option B.** Workflows triggered by a pull request from a **first-time external fork contributor** require manual approval before they run. The gate is limited to first-time external contributors: it is not a blanket requirement on all external contributors, and it does not apply to same-repository pull requests. Approval authorizes workflow execution only; it is not acceptance or merge of the pull request. |
+| D3 | Friends / API consumers | **API consumers only.** No repository access of any kind. API authentication is not implemented and not authorized. |
+| D4 | Repository write collaborators | A **trusted** contributor class, distinct from D1. Write access permits workflow modification. |
+| D5 | External network access | **Accepted** at the current project stage. |
+| D6 | Workflow token permissions | **Read-only**; `contents: read` is the ceiling. |
+| D7 | Security-sensitive files | **Code Owner approval is deferred, not abolished.** `.github/CODEOWNERS` is **retained as ownership and responsibility metadata**; it is not an approval gate while only one maintainer exists. Security-sensitive paths require an **explicit Owner self-review record** before merge (see below). The operative trigger is **any path listed in `.github/CODEOWNERS`**; illustrative examples of that coverage are `.github/CODEOWNERS` itself, `.github/workflows/`, `docs/security/`, this specification, security-assertion tests (`tests/unit/ci/`, `tests/unit/core/llm/`, `tests/helpers/architecture-scan.ts`), and supply-chain inputs (`package.json`, `package-lock.json`, `Dockerfile`, `compose.yaml`). The examples are illustrative, not exhaustive; `.github/CODEOWNERS` is authoritative. Self-review is **not** independent review and must never be described as such. Mandatory Code Owner approval is to be reconsidered when a **qualified independent reviewer** becomes available. |
+| D8 | Merge path, bypass, and deferral | **PR-based development and required CI status checks remain mandatory.** Required approving reviews remain **zero** while the project has one maintainer, and Code Owner approval remains **not enabled** during the single-maintainer period. The sole Owner **may merge their own PR through the normal configured merge path** after an explicit self-review record and successful required checks. This is the **configured normal path, not an administrator bypass**; administrator bypass must **not** be used as the routine merge mechanism, and the ruleset bypass list is intended to stay empty. Changes that **exceed the Owner's available verification capability must be deferred** until that capability exists. A self-reviewed merge must never be described as independently reviewed. |
+| D9 | Dependency install | Ordinary **`npm ci` retained**; lifecycle scripts may execute. No `--ignore-scripts`. |
+| D10 | Runner | GitHub-hosted **`ubuntu-24.04` only.** No `ubuntu-latest`, no self-hosted, no persistent runner. |
+| D11 | Fork PR credentials | **No valid Gemini or internal service credentials** are injected into Fork PR jobs. This does not prohibit separately isolated future deployment credentials. |
+| D12 | PR caching | **No cache restore or save** in untrusted PR jobs. |
+| D13 | `setup-node` caching | `package-manager-cache: false` **and** no explicit `cache` input. Both are required: they are independent switches. |
+| — | Fork PR Gemini transport | **Fake/Mock only.** No silent fallback to the real transport. |
+| — | CODEOWNERS self-coverage | CODEOWNERS **must cover itself**, otherwise the protection it provides can be edited away. |
+| — | Residual risks | **R1–R8 accepted** for the current personal/small collaborative stage. |
+| — | Milestones | **M5.0 and M5.1 authorized.** |
+| G1 | Action sourcing | **Official GitHub Actions only.** No third-party actions. |
+| G2 | Action pinning | Pin every action to a **verified full 40-character commit SHA**, with name, version, SHA and purpose recorded. No floating tags as final references. |
+| G7 | Security documentation | Create a separate **`docs/security/ci-security-model.md`**. |
+
+**Single-Maintainer Governance (GOV-1) — supersedes the prior disposition.** The
+paragraph previously recorded here as a "deliberate limitation, recorded rather
+than resolved" is **superseded for the sole-owner case** by an explicit
+Owner-approved governance decision. The earlier D7/D8 tension and the previous
+"defer rather than self-approve" disposition are **no longer the governing rule**
+for a single-maintainer repository. The project is independently maintained; no
+qualified independent technical reviewer is currently available; and **Owner
+self-review is authorized as the review mechanism**, subject to the record
+requirements below.
+
+This decision is **governance text only**. It does **not** reclassify any finding.
+Assertion 4, B-6, O-3 and T-10a remain **BLOCKED**, and the governing rule in
+`docs/security/ci-security-model.md` §10 remains binding.
+
+**Self-review record.** For every pull request touching a CODEOWNERS-listed
+path, a self-review record must appear in that pull request's description.
+For an **Owner-authored PR**, the Owner records this information in that PR's own
+description. The record must contain:
+
+- **(a)** what was reviewed;
+- **(b)** what verification was performed and what evidence was observed;
+- **(c)** what was **not** verified;
+- **(d)** explicit acknowledgement that the review was **self-review, not
+  independent review**.
+
+This is a **maintainer operating procedure**, not a native GitHub enforcement.
+GitHub Rulesets do **not** natively enforce these four description fields, and no
+automation is added here to enforce pull-request description content. An absent
+or fabricated record is a policy violation, not a platform error.
+
+**Deferral by verification capability.** A change must be **deferred** when the
+Owner cannot adequately verify it acting alone — specifically changes to this
+security model's threat assumptions, changes that would grant write permissions,
+add secrets, or alter the Fork-PR credential boundary, and any change the Owner
+cannot test or reason about to the standard §10 requires. Deferral means **not
+merging**, not merging-with-a-note.
+
+**Future reactivation.** When a **qualified independent reviewer** becomes
+available, mandatory Code Owner approval is to be re-enabled and the reviewer
+added to `.github/CODEOWNERS`. Until then, "Require review from Code Owners" must
+stay **off**: a requirement that cannot be satisfied is a requirement that will
+be bypassed.
+
+**Effective enforcement.** D7 and D8 still depend on the repository settings
+listed in `docs/security/ci-security-model.md` §7. Those settings are **not**
+changeable by repository files, have **not** been configured, and were **not**
+changed by M5.0, M5.1 or GOV-1.
+
+### 13.1 Still open
 Only the following remain undecided. Everything above is closed. None of these
 reopens a D-1..D-7 decision; each is a value or vocabulary question that sits
 _inside_ an approved decision.
@@ -6783,3 +7111,14 @@ Read-only inspection; no file was modified to produce this document.
   `vitest.config.ts`, `.env.example`
 - `tests/helpers/env.ts`, `tests/unit/cli/extraction-exit-codes.test.ts`,
   `tests/integration/cli/dry-run.test.ts`
+
+### A.1 Files added or reviewed by M5.0 / M5.1
+
+- `docs/security/ci-security-model.md` — **new** (M5.0, G7)
+- `.github/workflows/ci.yml` — **new** (M5.1)
+- `.github/CODEOWNERS` — **new** (M5.1)
+- `tests/unit/core/llm/no-real-transport.test.ts` — **new** (M5.1, 4-A)
+- `tests/unit/ci/workflow-policy.test.ts` — **new** (M5.1, 4-B)
+- `PROJECT_STATUS.md` — updated (M5.0)
+- `src/core/llm/provider.factory.ts`, `src/config/env.ts` — **inspected, unmodified**
+- `tests/helpers/architecture-scan.ts` — **inspected, unmodified**

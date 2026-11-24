@@ -170,3 +170,17 @@ troubleshooting.
 - [`docs/deployment.md`](docs/deployment.md) — Docker build and run workflow,
   Compose configuration, environment handling, health checks, and
   troubleshooting.
+
+## Copyright and Licensing
+
+Kou News Engine is publicly available for viewing and learning purposes.
+
+Unless otherwise stated, the project source code is not currently distributed
+under an open-source license. No general permission is granted to reuse, modify,
+or redistribute the project code.
+
+All rights not expressly granted are reserved by the respective copyright
+holders. Please contact the project owner for permission regarding uses beyond
+viewing and learning.
+
+The project's licensing policy may be reconsidered in the future.
