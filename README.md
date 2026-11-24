@@ -6,11 +6,44 @@ briefings, and deliver notifications through Kou AI and Telegram.
 
 ## Status
 
-Milestone 0 is complete: project scaffolding, Express bootstrap, environment
-validation, the health and readiness endpoints, and centralized error handling,
-along with a unit and integration test suite and coverage reporting. News
-collection, translation, summarization, and notification features are not
-implemented yet.
+This project is under active development. The **foundations are implemented**;
+the **product capabilities are not**.
+
+**Implemented foundations** (supported by source code in this repository):
+
+- HTTP server foundation: Express app factory, lifecycle, and centralized error
+  handling.
+- Health and readiness endpoints (`/api/health`, `/api/ready`).
+- Environment validation and configuration.
+- SQLite persistence with versioned migrations.
+- RSS/Atom feed ingestion, with a one-shot CLI (`npm run ingest`).
+- Article extraction (fetch, parse, normalise, persist), with a one-shot CLI
+  (`npm run extract`).
+- URL canonicalization and duplicate detection during ingestion.
+- A provider-agnostic LLM abstraction with a Gemini adapter and a `fake`
+  provider. The abstraction is built and tested, but **no production code path
+  calls it yet**.
+- CI foundation (GitHub Actions: typecheck, lint, test).
+
+**Not yet implemented** (no source code exists for these):
+
+- Runtime consumption of the LLM provider by any business process.
+- Translation of articles into Traditional Chinese.
+- AI summarization.
+- Classification of articles.
+- Importance ranking.
+- Daily briefing generation.
+- Original-content retention and deletion.
+- Long-term summary, index, and classification storage.
+- A news API for Kou AI.
+- Telegram integration.
+- Scheduled publication.
+
+**The GitHub repository is public, but the product is not deployed or released
+and does not yet deliver news operationally.** A public repository is not a
+launched product. See [`PROJECT_STATUS.md`](PROJECT_STATUS.md) for the verified
+milestone record and [`docs/architecture.md`](docs/architecture.md) for the
+implemented-versus-planned boundary.
 
 ## Tech Stack
 

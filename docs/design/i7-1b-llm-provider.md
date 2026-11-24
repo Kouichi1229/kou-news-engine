@@ -1,8 +1,8 @@
 # I7-1b — LLM Provider Abstraction: Design Specification
 
-Status: **Phases 1–4 implemented (uncommitted) and reviewed through M4.4 acceptance;
-M4.5 accepted with audit limitations; M4.6–M4.7 not started.** B-6 remains BLOCKED
-(see the table below).
+Status: **Phases 1–4 implemented, committed, and merged to `main` at `17a8c1c`;
+reviewed through M4.4 acceptance; M4.5 accepted with audit limitations; M4.6–M4.7
+not started.** B-6 remains BLOCKED (see the table below).
 
 **M4.5 is `ACCEPTED WITH AUDIT LIMITATIONS`** by Owner decision (§11.5.4a). The
 acceptance is scoped: it closes the *milestone*, not the audit limitations, and it
@@ -7018,8 +7018,13 @@ be bypassed.
 
 **Effective enforcement.** D7 and D8 still depend on the repository settings
 listed in `docs/security/ci-security-model.md` §7. Those settings are **not**
-changeable by repository files, have **not** been configured, and were **not**
-changed by M5.0, M5.1 or GOV-1.
+changeable by repository files and were **not** changed by M5.0, M5.1 or GOV-1.
+Since this document was first written, the `main` Ruleset has been configured
+outside those milestones: ruleset `main-protection-single-maintainer` is active on
+`refs/heads/main` with required check `verify` (strict), zero required approvals,
+Code Owner review off, and an empty bypass list. The remaining settings in §7
+(S1, S2, S5, S6, S7, S8) are still **NOT VERIFIED**. See
+`docs/security/ci-security-model.md` §7 for the current per-setting status.
 
 ### 13.1 Still open
 Only the following remain undecided. Everything above is closed. None of these
