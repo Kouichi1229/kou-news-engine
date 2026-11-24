@@ -1,6 +1,6 @@
 # Kou News Engine — Project Status & Handoff
 
-Last updated: 2026-11-18 (M6.0 documentation reconciliation: status refreshed against verified post-merge repository state — ruleset active, PR #1 merged, M5.1 reclassified PARTIAL, retention requirements recorded, Gemini model-ID validity recorded as unverified)
+Last updated: 2026-11-24 (M6.0 documentation reconciliation: status refreshed against verified post-merge repository state — ruleset active, PR #1 merged, M5.1 reclassified PARTIAL, retention requirements recorded, Gemini model-ID validity recorded as unverified)
 
 ## 1. Purpose
 

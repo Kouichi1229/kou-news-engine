@@ -653,7 +653,7 @@ module code.
 > requirements. Other documents should link here rather than restate the rules.
 
 Kou News Engine is intended to keep the *body text of original articles* only
-temporarily, while keeping the *derived* long-term records permanently. The
+temporarily, while keeping the *derived* records long-term. The
 requirements below are Owner-confirmed.
 
 ### Retention clock
