@@ -43,6 +43,12 @@ export interface ArticleContentRepository {
    *   back-to-back, hammering a host that is already failing. Attempts
    *   accumulate across runs instead, which is what the `MAX_ATTEMPTS` bound is
    *   meant to measure.
+   * A row that already holds a body at the same extractor version hands it back
+   * as `savedBody`, and the claim keeps it: an earlier attempt fetched that page
+   * and failed afterwards, so re-deriving is cheaper than re-fetching. A version
+   * change clears it, because the body then belongs to a parser that no longer
+   * runs.
+   *
    * @returns the claim, or `null` when nothing is claimable.
    */
   claim(input: {
@@ -56,6 +62,22 @@ export interface ArticleContentRepository {
 
   /** Records a successful extraction. `false` when the claim was lost. */
   complete(input: {
+    articleId: string;
+    token: string;
+    success: ExtractionSuccess;
+  }): Promise<boolean>;
+
+  /**
+   * Records the body while the claim is still running.
+   *
+   * The body is the expensive half of the work: a derivation failure afterwards
+   * must not throw it away, because the retry would pay for the same request
+   * again. It writes the body columns only, so the row keeps its `in_progress`
+   * shape until a terminal write decides the outcome.
+   *
+   * `false` when the claim was lost.
+   */
+  saveBody(input: {
     articleId: string;
     token: string;
     success: ExtractionSuccess;
@@ -78,7 +100,12 @@ export interface ArticleContentRepository {
     finalUrl: string;
   }): Promise<boolean>;
 
-  /** Records a failed attempt. `false` when the claim was lost. */
+  /**
+   * Records a failed attempt. `false` when the claim was lost.
+   *
+   * A derivation failure keeps the body the row holds (see `saveBody`), so the
+   * retry does not repeat the request. Any other failure clears it.
+   */
   markFailed(input: {
     articleId: string;
     token: string;
@@ -91,6 +118,9 @@ export interface ArticleContentRepository {
    * Only valid before the HTTP request is issued: after that point the work may
    * already have reached the remote server, so refunding would let a failing
    * host be hit more than `MAX_ATTEMPTS` times.
+   *
+   * A body the claim carried is left in place, so cancelling hands the stored
+   * work back rather than discarding it.
    *
    * `false` when the claim was lost.
    */

@@ -31,6 +31,12 @@ export interface ClaimedArticle {
   leaseToken: string;
   attempts: number;
   leaseExpiresAt: number;
+  /**
+   * The body an earlier attempt fetched and stored, present when this attempt
+   * only has to derive. `extractedAt` is when that body was extracted, not when
+   * this claim was taken.
+   */
+  savedBody?: ExtractionSuccess;
 }
 
 /** What a successful extraction produced, before it is written. */

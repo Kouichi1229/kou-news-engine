@@ -437,6 +437,122 @@ export const ARTICLE_DERIVED_MIGRATION: Migration = {
   ],
 };
 
+/**
+ * v7: keep a fetched body across a derivation retry.
+ *
+ * ## What changed and why
+ *
+ * v4's matrix required `failed` and `in_progress` rows to hold no body at all,
+ * so an attempt that fetched and parsed a body but failed afterwards (the model
+ * call, its output contract) had to discard it, and the retry paid for the same
+ * request again. The body is the expensive half of the work, so both states now
+ * admit a second, complete shape: the body columns present and self-consistent.
+ *
+ * What each shape means:
+ *
+ * - `in_progress` with a body — this attempt inherited a body an earlier attempt
+ *   fetched at the same extractor version, so only the derived record is missing;
+ * - `failed` with a body — the fetch succeeded and the attempt failed afterwards,
+ *   with the body kept for the retry.
+ *
+ * The two shapes are otherwise identical, which is what makes them interchangeable
+ * across a retry: the same columns are copied forward unchanged. A row without a
+ * body keeps the v4 shape exactly, so fetch failures are unaffected.
+ *
+ * This is a rebuild rather than an `ALTER`: SQLite cannot alter a CHECK
+ * constraint. The columns and their order are unchanged, so the copy is a plain
+ * `INSERT ... SELECT`, and no row can fail the new constraints — every shape v4
+ * allowed is still allowed.
+ */
+export const ARTICLE_CONTENTS_BODY_RETENTION_MIGRATION: Migration = {
+  version: 7,
+  name: 'article_contents_body_retention',
+  statements: [
+    `CREATE TABLE article_contents_v7 (
+      article_id        TEXT    PRIMARY KEY NOT NULL
+                                REFERENCES articles (id) ON DELETE CASCADE,
+      status            TEXT    NOT NULL
+                                CHECK (status IN ('extracted','empty','failed','in_progress')),
+
+      content_text      TEXT        NULL,
+      content_length    INTEGER NOT NULL DEFAULT 0,
+      extracted_at      TEXT        NULL,
+      final_url         TEXT        NULL,
+      extractor_version TEXT    NOT NULL,
+      failure_code      TEXT        NULL,
+      http_status       INTEGER     NULL,
+
+      attempts          INTEGER NOT NULL DEFAULT 0,
+      lease_owner       TEXT        NULL,
+      lease_token       TEXT        NULL,
+      lease_expires_at  INTEGER     NULL,
+
+      CHECK (typeof(attempts) = 'integer'),
+      CHECK (http_status IS NULL OR typeof(http_status) = 'integer'),
+      CHECK (lease_expires_at IS NULL OR typeof(lease_expires_at) = 'integer'),
+      CHECK (typeof(content_length) = 'integer'),
+      CHECK (attempts BETWEEN 0 AND 3),
+      CHECK (content_text IS NULL OR instr(content_text, char(0)) = 0),
+
+      CHECK (
+        (status = 'in_progress'
+          AND failure_code IS 'PENDING'
+          AND lease_owner IS NOT NULL AND lease_token IS NOT NULL
+          AND lease_expires_at IS NOT NULL
+          AND (
+               (content_text IS NULL AND content_length = 0
+                AND extracted_at IS NULL AND final_url IS NULL
+                AND http_status IS NULL)
+            OR (content_text IS NOT NULL AND content_length > 0
+                AND content_length = length(content_text)
+                AND extracted_at IS NOT NULL AND final_url IS NOT NULL
+                AND http_status IS NOT NULL AND http_status BETWEEN 200 AND 299)
+          ))
+     OR (status = 'extracted'
+          AND content_text IS NOT NULL AND content_length > 0
+          AND content_length = length(content_text)
+          AND extracted_at IS NOT NULL AND final_url IS NOT NULL
+          AND failure_code IS NULL
+          AND http_status IS NOT NULL AND http_status BETWEEN 200 AND 299
+          AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+     OR (status = 'empty'
+          AND content_text IS NULL AND content_length = 0
+          AND extracted_at IS NOT NULL AND final_url IS NOT NULL
+          AND failure_code IS NOT NULL
+          AND failure_code IN ('NO_CONTENT','CONTENT_TOO_SHORT')
+          AND http_status IS NOT NULL AND http_status BETWEEN 200 AND 299
+          AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+     OR (status = 'failed'
+          AND failure_code IS NOT NULL
+          AND failure_code NOT IN ('NO_CONTENT','CONTENT_TOO_SHORT')
+          AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL
+          AND (
+               (content_text IS NULL AND content_length = 0
+                AND extracted_at IS NULL AND final_url IS NULL)
+            OR (content_text IS NOT NULL AND content_length > 0
+                AND content_length = length(content_text)
+                AND extracted_at IS NOT NULL AND final_url IS NOT NULL
+                AND http_status IS NOT NULL AND http_status BETWEEN 200 AND 299)
+          ))
+      )
+    )`,
+    `INSERT INTO article_contents_v7
+       (article_id, status, content_text, content_length, extracted_at, final_url,
+        extractor_version, failure_code, http_status, attempts,
+        lease_owner, lease_token, lease_expires_at)
+     SELECT article_id, status, content_text, content_length, extracted_at, final_url,
+            extractor_version, failure_code, http_status, attempts,
+            lease_owner, lease_token, lease_expires_at
+       FROM article_contents`,
+    `DROP TABLE article_contents`,
+    `ALTER TABLE article_contents_v7 RENAME TO article_contents`,
+    `CREATE UNIQUE INDEX idx_article_contents_lease_token
+       ON article_contents (lease_token) WHERE lease_token IS NOT NULL`,
+    `CREATE INDEX idx_article_contents_claimable
+       ON article_contents (status, extractor_version, attempts)`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   INITIAL_MIGRATION,
   INSERTION_ORDER_AND_PRIMARY_SOURCE_MIGRATION,
@@ -444,6 +560,7 @@ export const MIGRATIONS: readonly Migration[] = [
   ARTICLE_CONTENTS_MIGRATION,
   PROCESSING_STATE_MIGRATION,
   ARTICLE_DERIVED_MIGRATION,
+  ARTICLE_CONTENTS_BODY_RETENTION_MIGRATION,
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {

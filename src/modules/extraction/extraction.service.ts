@@ -13,6 +13,7 @@ import {
 } from './extraction.constants.js';
 import { ExtractionFailureError } from './extraction.errors.js';
 import type {
+  ClaimedArticle,
   ExtractionFailure,
   ExtractionRunSummary,
   ExtractionSuccess,
@@ -178,7 +179,7 @@ export class ExtractionService {
         return summary;
       }
 
-      const outcome = await this.processClaim(claim.articleId, claim.leaseToken);
+      const outcome = await this.processClaim(claim);
 
       switch (outcome) {
         case 'extracted':
@@ -201,11 +202,19 @@ export class ExtractionService {
    * Fetches, parses and stores one article.
    *
    * Returns which counter to bump. `lost` means a fenced write affected no rows.
+   *
+   * A claim that carries a stored body skips straight to derivation: an earlier
+   * attempt already made the request and failed afterwards, so asking the source
+   * again would pay twice for the same page.
    */
   private async processClaim(
-    articleId: string,
-    token: string,
+    claim: ClaimedArticle,
   ): Promise<'extracted' | 'empty' | 'failed' | 'lost'> {
+    const { articleId, leaseToken: token } = claim;
+    if (claim.savedBody !== undefined) {
+      return this.deriveAndComplete(claim.savedBody, articleId, token);
+    }
+
     const url = await this.options.urls.findUrlById(articleId);
     if (url === undefined) {
       const recorded = await this.options.repository.markFailed({
@@ -274,11 +283,30 @@ export class ExtractionService {
       httpStatus: page.status,
       extractedAt,
     };
-    // Derivation runs before the row is completed, so "extracted" means both the
-    // body and its derived record are stored. A failure is recorded through the
-    // same fenced write every other failure uses, which spends the attempt and
-    // lets the existing budget decide between a retry and the ceiling.
-    const derivationFailure = await this.deriveDerived(articleId, text);
+    // The body is stored before the model sees it: a derivation failure then
+    // costs a retried model call, not a second request to the source.
+    const stored = await this.options.repository.saveBody({ articleId, token, success });
+    if (!stored) {
+      return 'lost';
+    }
+
+    return this.deriveAndComplete(success, articleId, token);
+  }
+
+  /**
+   * Stores the derived record, then completes the row.
+   *
+   * The order is the point: "extracted" means both the body and its derived
+   * record are stored. A derivation failure is recorded through the same fenced
+   * write every other failure uses — which spends the attempt, keeps the body and
+   * lets the existing budget decide between a retry and the ceiling.
+   */
+  private async deriveAndComplete(
+    success: ExtractionSuccess,
+    articleId: string,
+    token: string,
+  ): Promise<'extracted' | 'failed' | 'lost'> {
+    const derivationFailure = await this.deriveDerived(articleId, success.text);
     if (derivationFailure !== null) {
       const recorded = await this.options.repository.markFailed({
         articleId,

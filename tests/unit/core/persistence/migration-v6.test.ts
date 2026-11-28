@@ -53,13 +53,15 @@ afterEach(() => {
 });
 
 describe('v6 article_derived migration', () => {
-  it('is the latest migration and is recorded once applied', () => {
+  it('is applied and recorded once', () => {
     const handle = openMigratedDatabase();
 
-    expect(Math.max(...MIGRATIONS.map((migration) => migration.version))).toBe(
+    // v6 is no longer the newest migration; that guarantee lives in the v7
+    // suite. What matters here is that this version is recorded and applied.
+    expect(Math.max(...MIGRATIONS.map((migration) => migration.version))).toBeGreaterThan(
       ARTICLE_DERIVED_MIGRATION.version,
     );
-    expect(handle.version).toBe(6);
+    expect(handle.version).toBe(Math.max(...MIGRATIONS.map((migration) => migration.version)));
 
     const applied = handle.query((connection) =>
       connection.all('SELECT version, name FROM schema_migrations WHERE version = 6'),

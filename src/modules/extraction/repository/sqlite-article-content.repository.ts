@@ -1,5 +1,6 @@
 import type { SqliteDatabase } from '../../../core/persistence/sqlite.js';
 import {
+  DERIVATION_FAILURE_CODE,
   EMPTY_FAILURE_CODES,
   MAX_ATTEMPTS,
   PENDING_FAILURE_CODE,
@@ -141,6 +142,13 @@ export class SqliteArticleContentRepository implements ArticleContentRepository 
               )`;
   }
 
+  /**
+   * `CLAIM`. A stored body is carried forward at the same extractor version: it
+   * is the work an earlier attempt already paid for. A new version means the
+   * parser that produced it is no longer the one that would run, so the columns
+   * are cleared. A row without a body is cleared too — the status columns of a
+   * fresh attempt carry no memory of the previous one.
+   */
   private claimSql(excludeCount: number): string {
     return `UPDATE article_contents
                SET attempts = CASE
@@ -149,12 +157,31 @@ export class SqliteArticleContentRepository implements ArticleContentRepository 
                               END,
                    extractor_version = ?,
                    status = 'in_progress',
-                   content_text = NULL,
-                   content_length = 0,
-                   extracted_at = NULL,
-                   final_url = NULL,
+                   content_text = CASE
+                                    WHEN extractor_version <> ? THEN NULL
+                                    ELSE content_text
+                                  END,
+                   content_length = CASE
+                                      WHEN extractor_version <> ?
+                                        OR content_text IS NULL THEN 0
+                                      ELSE content_length
+                                    END,
+                   extracted_at = CASE
+                                    WHEN extractor_version <> ?
+                                      OR content_text IS NULL THEN NULL
+                                    ELSE extracted_at
+                                  END,
+                   final_url = CASE
+                                 WHEN extractor_version <> ?
+                                   OR content_text IS NULL THEN NULL
+                                 ELSE final_url
+                               END,
+                   http_status = CASE
+                                   WHEN extractor_version <> ?
+                                     OR content_text IS NULL THEN NULL
+                                   ELSE http_status
+                                 END,
                    failure_code = ?,
-                   http_status = NULL,
                    lease_owner = ?,
                    lease_token = ?,
                    lease_expires_at = ? + ?
@@ -163,7 +190,8 @@ export class SqliteArticleContentRepository implements ArticleContentRepository 
                       WHERE ${this.eligibilitySql(excludeCount)}
                       ORDER BY article_id
                       LIMIT 1)
-               RETURNING article_id, attempts, lease_expires_at`;
+               RETURNING article_id, attempts, lease_expires_at,
+                         content_text, extracted_at, final_url, http_status`;
   }
 
   private terminalGuard(): string {
@@ -187,6 +215,24 @@ export class SqliteArticleContentRepository implements ArticleContentRepository 
              RETURNING article_id`;
   }
 
+  /**
+   * `SAVE_BODY`: records the body while the claim is still running.
+   *
+   * It writes the body columns only, leaving `status` and `failure_code` alone, so
+   * the row keeps the `in_progress` shape the claim installed. That is what lets a
+   * derivation failure keep the body instead of discarding it.
+   */
+  private saveBodySql(): string {
+    return `UPDATE article_contents
+               SET content_text = ?,
+                   content_length = length(?),
+                   extracted_at = ?,
+                   final_url = ?,
+                   http_status = ?
+             WHERE ${this.terminalGuard()}
+             RETURNING article_id`;
+  }
+
   /** `EMPTY`: fetched successfully, no usable body. */
   private emptySql(): string {
     return `UPDATE article_contents
@@ -204,16 +250,35 @@ export class SqliteArticleContentRepository implements ArticleContentRepository 
              RETURNING article_id`;
   }
 
-  /** `FAIL`: the attempt did not produce a body. */
+  /**
+   * `FAIL`. A derivation failure keeps the body it inherited: the fetch was the
+   * expensive half, and the retry has to do the model call again, not the request.
+   * Every other failure produced no body of its own, so the columns stay clear.
+   */
   private failSql(): string {
     return `UPDATE article_contents
                SET status = 'failed',
-                   content_text = NULL,
-                   content_length = 0,
-                   extracted_at = NULL,
-                   final_url = NULL,
+                   content_text = CASE
+                                    WHEN ? IS '${DERIVATION_FAILURE_CODE}' THEN content_text
+                                    ELSE NULL
+                                  END,
+                   content_length = CASE
+                                      WHEN ? IS '${DERIVATION_FAILURE_CODE}' THEN content_length
+                                      ELSE 0
+                                    END,
+                   extracted_at = CASE
+                                    WHEN ? IS '${DERIVATION_FAILURE_CODE}' THEN extracted_at
+                                    ELSE NULL
+                                  END,
+                   final_url = CASE
+                                 WHEN ? IS '${DERIVATION_FAILURE_CODE}' THEN final_url
+                                 ELSE NULL
+                               END,
                    failure_code = ?,
-                   http_status = ?,
+                   http_status = CASE
+                                   WHEN ? IS '${DERIVATION_FAILURE_CODE}' THEN http_status
+                                   ELSE ?
+                                 END,
                    lease_owner = NULL,
                    lease_token = NULL,
                    lease_expires_at = NULL
@@ -221,16 +286,17 @@ export class SqliteArticleContentRepository implements ArticleContentRepository 
              RETURNING article_id`;
   }
 
-  /** `CANCEL` / `RELEASE`: back to the queue, refunding the attempt. */
+  /**
+   * `CANCEL` / `RELEASE`: back to the queue, refunding the attempt.
+   *
+   * The body columns are left alone rather than cleared: a cancelled attempt that
+   * inherited a body must hand it back, otherwise cancelling would throw away the
+   * one thing the retry cannot cheaply redo.
+   */
   private releaseSql(): string {
     return `UPDATE article_contents
                SET status = 'failed',
-                   content_text = NULL,
-                   content_length = 0,
-                   extracted_at = NULL,
-                   final_url = NULL,
                    failure_code = ?,
-                   http_status = NULL,
                    attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
                    lease_owner = NULL,
                    lease_token = NULL,
@@ -275,6 +341,11 @@ export class SqliteArticleContentRepository implements ArticleContentRepository 
         connection.all(this.claimSql(excluded.length), [
           input.extractorVersion,
           input.extractorVersion,
+          input.extractorVersion,
+          input.extractorVersion,
+          input.extractorVersion,
+          input.extractorVersion,
+          input.extractorVersion,
           PENDING_FAILURE_CODE,
           input.owner,
           input.token,
@@ -284,17 +355,27 @@ export class SqliteArticleContentRepository implements ArticleContentRepository 
           ...excluded,
           input.extractorVersion,
         ]),
-      ) as Array<{ article_id: string; attempts: number; lease_expires_at: number }>;
+      ) as Array<{
+        article_id: string;
+        attempts: number;
+        lease_expires_at: number;
+        content_text: string | null;
+        extracted_at: string | null;
+        final_url: string | null;
+        http_status: number | null;
+      }>;
 
       const row = rows[0];
       if (row === undefined) {
         return null;
       }
+      const savedBody = this.savedBody(row);
       return {
         articleId: row.article_id,
         leaseToken: input.token,
         attempts: row.attempts,
         leaseExpiresAt: row.lease_expires_at,
+        ...(savedBody === undefined ? {} : { savedBody }),
       };
     });
   }
@@ -305,6 +386,22 @@ export class SqliteArticleContentRepository implements ArticleContentRepository 
     success: ExtractionSuccess;
   }): Promise<boolean> {
     return this.terminal(this.completeSql(), [
+      input.success.text,
+      input.success.text,
+      input.success.extractedAt,
+      input.success.finalUrl,
+      input.success.httpStatus,
+      input.articleId,
+      input.token,
+    ]);
+  }
+
+  async saveBody(input: {
+    articleId: string;
+    token: string;
+    success: ExtractionSuccess;
+  }): Promise<boolean> {
+    return this.terminal(this.saveBodySql(), [
       input.success.text,
       input.success.text,
       input.success.extractedAt,
@@ -340,9 +437,15 @@ export class SqliteArticleContentRepository implements ArticleContentRepository 
     token: string;
     failure: ExtractionFailure;
   }): Promise<boolean> {
+    const code = input.failure.code;
     return this.terminal(this.failSql(), [
-      input.failure.code,
-      input.failure.httpStatus,
+      code,
+      code,
+      code,
+      code,
+      code,
+      code,
+      input.failure.httpStatus ?? null,
       input.articleId,
       input.token,
     ]);
@@ -362,6 +465,33 @@ export class SqliteArticleContentRepository implements ArticleContentRepository 
       }>;
       return rows.length > 0;
     });
+  }
+
+  /**
+   * Narrows a claimed row to the body it carried over, if any.
+   *
+   * The schema requires the four columns together, so a present `content_text`
+   * is enough to know the rest are there; a row that violates that is a broken
+   * invariant, not a row to guess about.
+   */
+  private savedBody(row: {
+    content_text: string | null;
+    extracted_at: string | null;
+    final_url: string | null;
+    http_status: number | null;
+  }): ExtractionSuccess | undefined {
+    if (row.content_text === null) {
+      return undefined;
+    }
+    if (row.extracted_at === null || row.final_url === null || row.http_status === null) {
+      throw new Error('A stored body is missing its extraction metadata');
+    }
+    return {
+      text: row.content_text,
+      extractedAt: row.extracted_at,
+      finalUrl: row.final_url,
+      httpStatus: row.http_status,
+    };
   }
 
   async findById(articleId: string): Promise<ArticleContent | undefined> {

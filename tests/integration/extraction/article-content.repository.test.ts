@@ -7,6 +7,7 @@ import {
   PENDING_FAILURE_CODE,
 } from '../../../src/modules/extraction/extraction.constants.js';
 import { SqliteArticleContentRepository } from '../../../src/modules/extraction/repository/sqlite-article-content.repository.js';
+import type { ExtractionSuccess } from '../../../src/modules/extraction/extraction.types.js';
 
 let database: SqliteDatabase;
 let repository: SqliteArticleContentRepository;
@@ -424,5 +425,108 @@ describe('release', () => {
     // The row is no longer in_progress, so a second release affects no rows.
     await repository.release({ articleId: 'a1', token: 'tok1' });
     expect((await repository.findById('a1'))?.attempts).toBe(0);
+  });
+});
+
+describe('stored body', () => {
+  const BODY = '一段已抓取的新聞正文，用來測試重試不必重新抓取。';
+  const body: ExtractionSuccess = {
+    text: BODY,
+    finalUrl: 'https://example.com/a1',
+    httpStatus: 200,
+    extractedAt: '2026-02-01T00:00:00.000Z',
+  };
+
+  it('records the body while the claim is still running', async () => {
+    insertArticle('a1', 1);
+    await claim({ token: 'tok1' });
+
+    expect(await repository.saveBody({ articleId: 'a1', token: 'tok1', success: body })).toBe(true);
+
+    const row = await repository.findById('a1');
+    expect(row?.status).toBe('in_progress');
+    expect(row?.contentText).toBe(BODY);
+    expect(row?.contentLength).toBe([...BODY].length);
+    expect(row?.httpStatus).toBe(200);
+    // A stale token is fenced out, exactly like the other writes.
+    expect(await repository.saveBody({ articleId: 'a1', token: 'stale', success: body })).toBe(
+      false,
+    );
+  });
+
+  it('keeps the body when the failure came from derivation', async () => {
+    insertArticle('a1', 1);
+    await claim({ token: 'tok1' });
+    await repository.saveBody({ articleId: 'a1', token: 'tok1', success: body });
+
+    await repository.markFailed({
+      articleId: 'a1',
+      token: 'tok1',
+      failure: { code: 'DERIVATION_FAILED', httpStatus: null },
+    });
+
+    const row = await repository.findById('a1');
+    expect(row).toMatchObject({
+      status: 'failed',
+      failureCode: 'DERIVATION_FAILED',
+      contentText: BODY,
+      httpStatus: 200,
+      leaseToken: null,
+    });
+  });
+
+  it('clears the body when the failure came from the fetch', async () => {
+    insertArticle('a1', 1);
+    await claim({ token: 'tok1' });
+    await repository.saveBody({ articleId: 'a1', token: 'tok1', success: body });
+
+    await repository.markFailed({
+      articleId: 'a1',
+      token: 'tok1',
+      failure: { code: 'HTTP_500', httpStatus: 500 },
+    });
+
+    const row = await repository.findById('a1');
+    expect(row?.contentText).toBeNull();
+    expect(row?.contentLength).toBe(0);
+  });
+
+  it('hands the stored body back on the next claim at the same version', async () => {
+    insertArticle('a1', 1);
+    await claim({ token: 'tok1' });
+    await repository.saveBody({ articleId: 'a1', token: 'tok1', success: body });
+    await repository.markFailed({
+      articleId: 'a1',
+      token: 'tok1',
+      failure: { code: 'DERIVATION_FAILED', httpStatus: null },
+    });
+
+    const reclaimed = await claim({ token: 'tok2' });
+
+    expect(reclaimed?.attempts).toBe(2);
+    expect(reclaimed?.savedBody).toEqual(body);
+  });
+
+  it('clears the stored body when the extractor version changes', async () => {
+    insertArticle('a1', 1);
+    await claim({ token: 'tok1' });
+    await repository.saveBody({ articleId: 'a1', token: 'tok1', success: body });
+    await repository.markFailed({
+      articleId: 'a1',
+      token: 'tok1',
+      failure: { code: 'DERIVATION_FAILED', httpStatus: null },
+    });
+
+    const reclaimed = await claim({ token: 'tok2', extractorVersion: 'v2' });
+
+    expect(reclaimed?.attempts).toBe(1);
+    expect(reclaimed?.savedBody).toBeUndefined();
+    expect((await repository.findById('a1'))?.contentText).toBeNull();
+  });
+
+  it('gives no saved body back on a first claim', async () => {
+    insertArticle('a1', 1);
+    const first = await claim({ token: 'tok1' });
+    expect(first?.savedBody).toBeUndefined();
   });
 });

@@ -222,6 +222,75 @@ describe('extraction → derivation → article_derived', () => {
     expect(derivedRows()).toHaveLength(1);
   });
 
+  it('does not fetch the page again when the retry only has to derive', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [
+        { kind: 'error', error: 'unavailable' },
+        { kind: 'success', text: modelReply(120, '第二次才成功') },
+      ],
+    });
+    const fetches: string[] = [];
+    const service = new ExtractionService({
+      repository: contents,
+      urls: urlLookup(),
+      clock: { now: () => 1_000 },
+      fetchPage: async (url) => {
+        fetches.push(url);
+        return { html: html(BODY), finalUrl: 'https://example.com/a1', status: 200 };
+      },
+      deriveArticle: async (articleId, text): Promise<void> => {
+        await derivation(provider).derive(articleId, text);
+      },
+    });
+
+    const first = await service.run();
+    const failedRow = await contents.findById('a1');
+    const second = await service.run();
+    const row = await contents.findById('a1');
+
+    expect(first.failed).toBe(1);
+    // The body survived the failed attempt, so the retry had nothing to fetch.
+    expect(failedRow?.status).toBe('failed');
+    expect(failedRow?.contentText).not.toBeNull();
+    expect(second.extracted).toBe(1);
+    expect(fetches).toEqual(['https://example.com/a1']);
+    expect(row).toMatchObject({ status: 'extracted', attempts: 2 });
+    expect(derivedRows()).toMatchObject([{ article_id: 'a1', title_zh: '第二次才成功' }]);
+  });
+
+  it('fetches again when the previous attempt produced no body', async () => {
+    insertArticle('a1');
+    // Only one derivation call happens: the first run never reaches the model.
+    const provider = new FakeProvider({
+      responses: [{ kind: 'success', text: modelReply(120, '重試標題') }],
+    });
+    let attempts = 0;
+    const service = new ExtractionService({
+      repository: contents,
+      urls: urlLookup(),
+      clock: { now: () => 1_000 },
+      fetchPage: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error('network down');
+        }
+        return { html: html(BODY), finalUrl: 'https://example.com/a1', status: 200 };
+      },
+      deriveArticle: async (articleId, text): Promise<void> => {
+        await derivation(provider).derive(articleId, text);
+      },
+    });
+
+    const first = await service.run();
+    const second = await service.run();
+
+    expect(first.failed).toBe(1);
+    expect(second.extracted).toBe(1);
+    expect(attempts).toBe(2);
+    expect((await contents.findById('a1'))?.contentText).not.toBeNull();
+  });
+
   it('succeeds on a retry after a failing derivation', async () => {
     insertArticle('a1');
     const provider = new FakeProvider({
