@@ -12,6 +12,7 @@ import {
   type LlmProviderDeps,
 } from './core/llm/provider.factory.js';
 import { openDatabase, type SqliteDatabase, type SqliteQuery } from './core/persistence/sqlite.js';
+import { SqliteArticleDerivedRepository } from './modules/derivation/repository/sqlite-article-derived.repository.js';
 import { createDatabaseProbe } from './modules/health/database.probe.js';
 import { createDrainingProbe } from './modules/health/draining.probe.js';
 import type { ArticleRepository } from './modules/ingestion/repository/article.repository.js';
@@ -227,14 +228,13 @@ export function createRuntime(deps: RuntimeDependencies = {}): Runtime {
     // instance the shutdown handler later waits on.
     const requests = createRequestTracker();
 
-    // Both dependencies are read on every request. `createDrainingProbe`
-    // reports the lifecycle; `createDatabaseProbe` queries the handle this
-    // Runtime owns. Neither opens a resource of its own.
+    // Wired per Runtime: the probes read the lifecycle, the reader borrows the handle.
     const app = buildApp({
       readinessProbes: [
         createDrainingProbe(lifecycle),
         createDatabaseProbe(() => probeDatabase(database)),
       ],
+      derivedArticles: new SqliteArticleDerivedRepository(database),
       requestTracking: { tracker: requests, lifecycle },
     });
     const publicDatabase = restrictDatabase(database);

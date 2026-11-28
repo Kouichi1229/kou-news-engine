@@ -5,6 +5,7 @@ import { notFoundHandler } from './core/http/not-found.js';
 import { createRequestTrackingMiddleware } from './core/http/request-tracking.js';
 import type { LifecycleState } from './core/lifecycle/lifecycle-state.js';
 import type { RequestTracker } from './core/lifecycle/request-tracker.js';
+import type { ArticleDerivedRepository } from './modules/derivation/repository/article-derived.repository.js';
 import type { ReadinessProbe } from './modules/health/readiness.js';
 import { createApiRouter } from './routes/index.js';
 
@@ -18,6 +19,14 @@ export interface AppOptions {
    * observe that database.
    */
   readinessProbes?: readonly ReadinessProbe[];
+
+  /**
+   * Reads derived records for `/api/articles/:articleId/derived`.
+   *
+   * Omitted when the app is built without a database (tests, health-only
+   * builds), in which case the route is not mounted.
+   */
+  derivedArticles?: ArticleDerivedRepository;
 
   /**
    * In-flight request tracking. When omitted, requests are not tracked.
@@ -62,7 +71,15 @@ export function createApp(options: AppOptions = {}): Express {
 
   app.use(express.json());
 
-  app.use('/api', createApiRouter({ readinessProbes: options.readinessProbes ?? [] }));
+  app.use(
+    '/api',
+    createApiRouter({
+      readinessProbes: options.readinessProbes ?? [],
+      ...(options.derivedArticles === undefined
+        ? {}
+        : { derivedArticles: options.derivedArticles }),
+    }),
+  );
 
   app.use(notFoundHandler);
   app.use(errorHandler);

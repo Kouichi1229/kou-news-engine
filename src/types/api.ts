@@ -18,3 +18,17 @@ export interface ReadyResponse {
   checks: Record<string, unknown>;
   timestamp: string;
 }
+
+/**
+ * One article's derived record.
+ *
+ * Every field is a column of `article_derived` as the repository reports it; the
+ * response adds nothing the store does not hold.
+ */
+export interface DerivedArticleResponse {
+  articleId: string;
+  titleZh: string;
+  summaryZh: string;
+  /** When this record was last written, ISO 8601. */
+  updatedAt: string;
+}
