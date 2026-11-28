@@ -78,6 +78,16 @@ export const ALLOWED_PORTS: readonly number[] = [80, 443];
 export const PENDING_FAILURE_CODE = 'PENDING';
 
 /**
+ * Recorded when the stored body could not be turned into its Chinese title and
+ * summary.
+ *
+ * Transient by design: it is absent from `PERMANENT_FAILURE_CODES`, so the same
+ * attempt budget retries it, and a row that reaches `MAX_ATTEMPTS` stops being
+ * claimable under the rule every other retryable failure follows.
+ */
+export const DERIVATION_FAILURE_CODE = 'DERIVATION_FAILED';
+
+/**
  * Failure codes that mean "the fetch succeeded but produced no usable body".
  *
  * These are the only codes allowed on an `empty` row, and the only codes

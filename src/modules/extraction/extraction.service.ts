@@ -3,6 +3,7 @@ import { hostname as osHostname } from 'node:os';
 
 import {
   CONCURRENCY,
+  DERIVATION_FAILURE_CODE,
   EMPTY_FAILURE_CODES,
   EXTRACTOR_VERSION,
   LEASE_MS,
@@ -11,7 +12,11 @@ import {
   REQUEST_TIMEOUT_MS,
 } from './extraction.constants.js';
 import { ExtractionFailureError } from './extraction.errors.js';
-import type { ExtractionRunSummary, ExtractionSuccess } from './extraction.types.js';
+import type {
+  ExtractionFailure,
+  ExtractionRunSummary,
+  ExtractionSuccess,
+} from './extraction.types.js';
 import { safeFetch } from './http/safe-fetch.js';
 import { looksMisDecoded } from './http/charset.js';
 import type { ResolveFunction } from './http/dns-pin.js';
@@ -47,13 +52,14 @@ export interface ExtractionServiceOptions {
   /** Injected for deterministic lease tokens in tests. */
   tokenFactory?: () => string;
   /**
-   * Runs after a body has been stored successfully, with the article id and the
-   * exact text just written. Absent means body extraction only.
+   * Turns the extracted text into its Chinese title and summary. Absent means
+   * body extraction only.
    *
-   * Called at most once per article per run and only after the fenced write
-   * succeeded: there is nothing to summarise when the claim was lost or the body
-   * was never stored. A failure here must never undo the extraction, so it is
-   * caught and swallowed — the caller is expected to log it itself.
+   * Called at most once per article per run, after the body passed every gate and
+   * before the row is completed. A throw fails the attempt: the derived record is
+   * part of the job, so a model failure is retried by the existing budget instead
+   * of leaving a completed row with no summary. The hook is expected to log the
+   * cause itself; only the failure is recorded here.
    */
   deriveArticle?: (articleId: string, text: string) => Promise<void>;
   concurrency?: number;
@@ -268,29 +274,40 @@ export class ExtractionService {
       httpStatus: page.status,
       extractedAt,
     };
-    const recorded = await this.options.repository.complete({ articleId, token, success });
-    if (!recorded) {
-      return 'lost';
+    // Derivation runs before the row is completed, so "extracted" means both the
+    // body and its derived record are stored. A failure is recorded through the
+    // same fenced write every other failure uses, which spends the attempt and
+    // lets the existing budget decide between a retry and the ceiling.
+    const derivationFailure = await this.deriveDerived(articleId, text);
+    if (derivationFailure !== null) {
+      const recorded = await this.options.repository.markFailed({
+        articleId,
+        token,
+        failure: derivationFailure,
+      });
+      return recorded ? 'failed' : 'lost';
     }
 
-    await this.deriveDerived(articleId, text);
-    return 'extracted';
+    const recorded = await this.options.repository.complete({ articleId, token, success });
+    return recorded ? 'extracted' : 'lost';
   }
 
   /**
-   * Runs the post-extraction derivation hook.
+   * Runs the derivation hook, returning the failure to record rather than
+   * throwing: the outcome is an extraction outcome, not a separate error path.
    *
-   * The body is already committed at this point, so nothing that happens here may
-   * change the extraction outcome: an exception is absorbed and the run continues.
+   * `null` means "nothing to record" — either no hook is configured or the
+   * derived record is stored.
    */
-  private async deriveDerived(articleId: string, text: string): Promise<void> {
+  private async deriveDerived(articleId: string, text: string): Promise<ExtractionFailure | null> {
     if (this.options.deriveArticle === undefined) {
-      return;
+      return null;
     }
     try {
       await this.options.deriveArticle(articleId, text);
+      return null;
     } catch {
-      // Absorbed by contract; the hook owns reporting.
+      return { code: DERIVATION_FAILURE_CODE, httpStatus: null };
     }
   }
 

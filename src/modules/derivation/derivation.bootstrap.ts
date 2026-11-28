@@ -31,6 +31,10 @@ export interface DerivationHookDeps {
 /**
  * Builds the post-extraction hook, or nothing when there is no usable provider.
  *
+ * The hook's contract is "store the record or throw". Extraction treats a throw
+ * as a failed attempt, so a model failure is retried by the existing attempt
+ * budget rather than leaving a completed row without a Chinese title.
+ *
  * The provider is built from the same factory and the same Gemini adapter the
  * HTTP runtime uses; only the construction site differs, because this process
  * has none. `fake` yields no hook: the unscripted fake can only reply with a
@@ -59,12 +63,14 @@ export async function createDerivationHook(
           summaryChars: [...draft.summaryZh].length,
         });
       } catch (error) {
-        // The body is already committed: a derivation failure is a warning, never
-        // a failed extraction and never a retry.
+        // Reported here and re-thrown: the job is not complete until the derived
+        // record is stored, so the extraction service records this against the
+        // attempt and the existing retry budget decides what follows.
         deps.log.warn('Article derivation failed', {
           articleId,
           error: error instanceof Error ? error.message : String(error),
         });
+        throw error;
       }
     },
   };

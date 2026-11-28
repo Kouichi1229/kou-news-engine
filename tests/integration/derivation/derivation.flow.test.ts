@@ -5,10 +5,10 @@ import { openDatabase, type SqliteDatabase } from '../../../src/core/persistence
 import {
   ArticleDerivationService,
   DERIVATION_LIMITS,
-  DerivationError,
 } from '../../../src/modules/derivation/derivation.service.js';
 import { createDerivationHook } from '../../../src/modules/derivation/derivation.bootstrap.js';
 import { SqliteArticleDerivedRepository } from '../../../src/modules/derivation/repository/sqlite-article-derived.repository.js';
+import { MAX_ATTEMPTS } from '../../../src/modules/extraction/extraction.constants.js';
 import { ExtractionService } from '../../../src/modules/extraction/extraction.service.js';
 import { SqliteArticleContentRepository } from '../../../src/modules/extraction/repository/sqlite-article-content.repository.js';
 
@@ -145,7 +145,7 @@ describe('extraction → derivation → article_derived', () => {
     expect(request?.maxOutputTokens).toBe(DERIVATION_LIMITS.maxOutputTokens);
   });
 
-  it('leaves no derived row and no failed extraction when the model answer is not JSON', async () => {
+  it('fails the attempt when the model answer is not JSON', async () => {
     insertArticle('a1');
     const provider = new FakeProvider({
       responses: [{ kind: 'success', text: '這裡是一段摘要，但不是 JSON。' }],
@@ -161,27 +161,105 @@ describe('extraction → derivation → article_derived', () => {
         status: 200,
       }),
       deriveArticle: async (articleId, text): Promise<void> => {
-        await expect(derivation(provider).derive(articleId, text)).rejects.toBeInstanceOf(
-          DerivationError,
-        );
+        await derivation(provider).derive(articleId, text);
       },
     });
 
     const summary = await service.run();
 
-    expect(summary.extracted).toBe(1);
-    expect(summary.failed).toBe(0);
+    expect(summary.extracted).toBe(0);
+    expect(summary.failed).toBe(1);
     expect(derivedRows()).toEqual([]);
-    expect((await contents.findById('a1'))?.status).toBe('extracted');
+    expect(await contents.findById('a1')).toMatchObject({
+      status: 'failed',
+      failureCode: 'DERIVATION_FAILED',
+    });
   });
 
-  it('survives a provider failure', async () => {
+  it('fails the attempt when the provider call fails', async () => {
     insertArticle('a1');
     const provider = new FakeProvider({ responses: [{ kind: 'error', error: 'unavailable' }] });
 
     const summary = await runExtraction(provider);
+    const row = await contents.findById('a1');
+
+    expect(summary.extracted).toBe(0);
+    expect(summary.failed).toBe(1);
+    expect(row).toMatchObject({
+      status: 'failed',
+      failureCode: 'DERIVATION_FAILED',
+      attempts: 1,
+      leaseToken: null,
+    });
+    expect(derivedRows()).toEqual([]);
+  });
+
+  it('fails the attempt when the model output does not satisfy the contract', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [{ kind: 'success', text: modelReply(120, '   ') }],
+    });
+
+    const summary = await runExtraction(provider);
+    const row = await contents.findById('a1');
+
+    expect(summary.extracted).toBe(0);
+    expect(summary.failed).toBe(1);
+    expect(row).toMatchObject({ status: 'failed', failureCode: 'DERIVATION_FAILED', attempts: 1 });
+    expect(derivedRows()).toEqual([]);
+  });
+
+  it('completes the row only once the derived record is stored', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [{ kind: 'success', text: modelReply(120, '成功標題') }],
+    });
+
+    const summary = await runExtraction(provider);
 
     expect(summary.extracted).toBe(1);
+    expect((await contents.findById('a1'))?.status).toBe('extracted');
+    expect(derivedRows()).toHaveLength(1);
+  });
+
+  it('succeeds on a retry after a failing derivation', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [
+        { kind: 'error', error: 'unavailable' },
+        { kind: 'success', text: modelReply(120, '重試成功標題') },
+      ],
+    });
+
+    const first = await runExtraction(provider);
+    const second = await runExtraction(provider);
+    const row = await contents.findById('a1');
+
+    expect(first.failed).toBe(1);
+    expect(second.extracted).toBe(1);
+    expect(row).toMatchObject({ status: 'extracted', attempts: 2, failureCode: null });
+    expect(derivedRows()).toMatchObject([{ article_id: 'a1', title_zh: '重試成功標題' }]);
+  });
+
+  it('stops retrying at the attempt ceiling and leaves the row failed', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({ responses: [{ kind: 'error', error: 'unavailable' }] });
+
+    const runs = [
+      await runExtraction(provider),
+      await runExtraction(provider),
+      await runExtraction(provider),
+    ];
+    const exhausted = await runExtraction(provider);
+    const row = await contents.findById('a1');
+
+    expect(runs.map((run) => run.failed)).toEqual([1, 1, 1]);
+    expect(exhausted.claimed).toBe(0);
+    expect(row).toMatchObject({
+      status: 'failed',
+      failureCode: 'DERIVATION_FAILED',
+      attempts: MAX_ATTEMPTS,
+    });
     expect(derivedRows()).toEqual([]);
   });
 
@@ -362,13 +440,13 @@ describe('createDerivationHook — the wiring the extraction CLI uses', () => {
     ]);
   });
 
-  it('absorbs a provider failure so the extraction run is unaffected', async () => {
+  it('propagates a provider failure so extraction records the attempt', async () => {
     insertArticle('a1');
     const provider = new FakeProvider({ responses: [{ kind: 'error', error: 'unavailable' }] });
 
     const hook = await createDerivationHook({ database, now: () => 0, log: silent, provider });
 
-    await expect(hook.deriveArticle?.('a1', BODY)).resolves.toBeUndefined();
+    await expect(hook.deriveArticle?.('a1', BODY)).rejects.toThrow();
     expect(derivedRows()).toEqual([]);
   });
 });
