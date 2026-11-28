@@ -28,7 +28,7 @@ plan for a fact.
 | Phase 2 — config and factory                   | **Implemented, not committed**                                                                                                                                                 |
 | Phase 3 — CLI isolation tests (T-11a..T-11d)   | **Implemented, not committed** — PASS WITH LIMITATIONS (Section 11.0)                                                                                                          |
 | Phase 4 — real Gemini adapter                  | **Implemented, not committed** (M4.1 transport, M4.2 adapter, M4.3 factory wiring, M4.4 runtime composition). Specification revised by M4.0 (§11.1) and M4.0.1 (§11.6)         |
-| API interface for Phase 4                      | **Interactions API**, `POST /v1/interactions` — selected by M4.0.1 (Section 11.6.7). `generateContent` is officially legacy                                                    |
+| API interface for Phase 4                      | **Interactions API**, `POST /v1beta/interactions` — selected by M4.0.1 (Section 11.6.7). `generateContent` is officially legacy                                                    |
 | Pricing / egress / response limits             | **Specified** by M4.0.2 — tiered pricing (§11.1.1), O-5 approved (§11.6.9), O-7 provisional (§11.6.8). **T-19 approved and 32,768 retained** by M4.0.3 (§11.6.8.4a, §11.6.8.7) |
 | Gemini provider adapter (`gemini.provider.ts`) | **Implemented, not committed** (M4.2)                                                                                                                                          |
 | Gemini transport (`gemini.transport.ts`)       | **Implemented, not committed** (M4.1) — `node:https` request, no SDK. Specified in §11.1.5                                                                                     |
@@ -1095,7 +1095,7 @@ below reaches the network, and none is permitted to be weakened to obtain a pass
 | **Purpose**                     | Prove the adapter is built and called through one injected transport, with no second egress path                                                                                                               | Prove `createRuntime()` starts with no key and eagerly builds no provider or transport                                                                           | Prove an adapter-level timeout surfaces as `LlmTimeoutError`                       | Prove an aborted caller signal rejects instead of resolving late |
 | **Precondition**                | Adapter + recording double; static scans available                                                                                                                                                             | `GEMINI_API_KEY` unset; fresh runtime                                                                                                                            | Adapter + a transport that never settles                                           | Adapter + a transport that is pending when the signal aborts     |
 | **Input**                       | Construct, then `complete()` with a normal request                                                                                                                                                             | Call `createRuntime()`; never call `getProvider()`                                                                                                               | Request with `timeoutMs` below the transport's delay                               | Request with an `AbortSignal`; abort after the call starts       |
-| **Expected**                    | No request on construction; `calls.length === 0` after construction; the expected `POST /v1/interactions` request appears after `complete()` with `store: false`; N-1 or complete N-2; both static parts clean | Returns a runtime; no provider constructed; `gemini.transport` not in the module registry; `getProvider()` never called (see the assertion-strength table below) | Rejects with `LlmTimeoutError`, `kind === 'timeout'`, and the request is destroyed | Rejects; does not resolve after abort; no unhandled rejection    |
+| **Expected**                    | No request on construction; `calls.length === 0` after construction; the expected `POST /v1beta/interactions` request appears after `complete()` with `store: false`; N-1 or complete N-2; both static parts clean | Returns a runtime; no provider constructed; `gemini.transport` not in the module registry; `getProvider()` never called (see the assertion-strength table below) | Rejects with `LlmTimeoutError`, `kind === 'timeout'`, and the request is destroyed | Rejects; does not resolve after abort; no unhandled rejection    |
 | **Security property verified**  | Single egress; no hidden socket                                                                                                                                                                                | No eager credential or vendor initialisation                                                                                                                     | A hung socket cannot outlive its deadline                                          | Cancellation actually stops work                                 |
 | **External network**            | **No**                                                                                                                                                                                                         | **No**                                                                                                                                                           | **No**                                                                             | **No**                                                           |
 | **Fake transport allowed**      | **Required**                                                                                                                                                                                                   | Not used                                                                                                                                                         | **Required**                                                                       | **Required**                                                     |
@@ -3898,28 +3898,37 @@ the change is auditable rather than silent.
 | Element          | Specification (Interactions API)                                                                                                           |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | Endpoint (fixed) | `https://generativelanguage.googleapis.com` — a module constant. **No caller may supply a URL, host, or path**                             |
-| Path             | `/v1/interactions`                                                                                                                         |
+| Path             | `/v1beta/interactions`                                                                                                                     |
 | HTTP method      | `POST`                                                                                                                                     |
-| API version      | `v1` — the **stable** version. Google documents the Interactions API as generally available in `v1`                                        |
+| API version      | `v1beta` — the version Google's Interactions API quickstart and reference samples call (S-15, S-2). A stable `v1` route also exists (S-3)   |
 | Auth header      | `x-goog-api-key: <key>` — set by the transport only (Section 11.1.4)                                                                       |
 | Content-Type     | `application/json`                                                                                                                         |
-| `Api-Revision`   | **Not sent.** It is not part of the documented API reference and not required for `v1`. See Section 11.6.2.1                               |
+| `Api-Revision`   | **Not sent.** It appears in REST samples (S-13, S-15) but not in either API reference. See Section 11.6.2.1                               |
 | Request body     | `{ model, input, system_instruction?, generation_config?, store }` per Section 11.6.4                                                      |
 | Success response | HTTP 2xx with an `Interaction` JSON body                                                                                                   |
 | Response parsing | `JSON.parse` inside a `try`; a parse failure is `invalid_response`. Structural validation is explicit field checking, not a schema library |
 | Non-2xx handling | Classified by the documented `error.code` string per Section 11.6.6. The raw vendor body is **not** propagated (Section 11.1.4)            |
 
-**Why `v1` and not `v1beta`.** Google's API-versions page states that the
-Interactions API and its core features are **generally available in `v1`**, and
-that `v1` is the stable version whose features are fully supported for the
-lifetime of the major version. `v1beta` is documented as carrying features still
-subject to change. Phase 4 needs none of the `v1beta`-only features (Live API,
-explicit context caching, managed agents), so `v1` is both sufficient and the
-lower-risk choice.
+**Why `v1beta` and not `v1`.** The route this design calls is the one Google's own
+Interactions API quickstart uses: S-15 shows `POST
+https://generativelanguage.googleapis.com/v1beta/interactions` as the first call a
+new project makes, and the reference samples for `create` do the same (S-2). An
+adapter that mirrors the documented samples is the adapter that can be checked
+against them line by line, which matters more here than picking a version label.
+
+M4.0.1 originally chose the stable `v1` route and argued that `v1beta` carries
+features still subject to change. That argument is still true, and the trade-off is
+recorded rather than hidden: this design accepts the beta surface on the Owner's
+instruction (2026-11-26). The exposure is bounded, because the version appears in
+exactly one module constant — `GEMINI_INTERACTIONS_PATH` in the transport and the
+same constant in the adapter. Returning to `v1` is a one-line change in two files
+if the beta surface moves, and the request and response shapes documented below are
+shared by both versions.
 
 This also closes a gap M4.0 left open. M4.0 wrote that a stable `v1` equivalent
 "was not confirmed" for `generateContent`. For the Interactions API that question
-is answered: `/v1/interactions` is documented.
+is answered: a stable `v1` route is documented (S-3), and the `v1beta` route this
+design calls is documented too (S-2, S-15).
 
 **`store` is sent explicitly as `false`.** Google documents that the Interactions
 API **stores every interaction by default** (`store=true`) — 55 days on the paid
@@ -4736,7 +4745,7 @@ green.
 | **M4.0**   | Specification revision (§11.1)                                          | —                         | **Complete**                                             |
 | **M4.0.1** | API interface re-evaluation (§11.6)                                     | —                         | **Complete** — Interactions API adopted                  |
 | M4.1       | Transport implementation (`node:https`, §11.6.4)                        | O-5, O-7                  | Single egress cannot be shown → S-3 stop                 |
-| M4.2       | Adapter implementation (`/v1/interactions`) + `gemini.provider.test.ts` | M4.1, O-1 (ratified), O-2 | Adapter needs a networking import                        |
+| M4.2       | Adapter implementation (`/v1beta/interactions`) + `gemini.provider.test.ts` | M4.1, O-1 (ratified), O-2 | Adapter needs a networking import                        |
 | M4.3       | Factory wiring (§11.3.2)                                                | M4.2                      | Unintended Phase 2 product behaviour changes (§11.5.2)   |
 | M4.4       | Runtime lazy composition (§11.1.8, §11.5.3)                             | M4.3                      | Sync/async cannot be reconciled (none expected)          |
 | M4.5       | Static architecture evidence (B-5), §11.5.4                             | M4.2, M4.4                | **ACCEPTED WITH AUDIT LIMITATIONS** (§11.5.4a); stop condition was "a bare specifier cannot be justified" |
@@ -5756,6 +5765,7 @@ inferring it.
 | S-12 | Model card: `gemini-4-argon`                   | `https://ai.google.dev/gemini-api/docs/models/gemini-4-argon`        | 2026-11-18 |
 | S-13 | Text generation (REST samples, `Api-Revision`) | `https://ai.google.dev/gemini-api/docs/text-generation`              | 2026-11-18 |
 | S-14 | Optimization and inference (service tiers)     | `https://ai.google.dev/gemini-api/docs/optimization`                 | 2026-11-18 |
+| S-15 | Get started (Interactions API quickstart)      | `https://ai.google.dev/gemini-api/docs/get-started`                  | 2026-11-26 |
 
 Google's `ai.google.dev` documentation host now redirects to
 `aistudio.google.com` for these paths. The URLs above are the canonical ones that
@@ -5796,7 +5806,8 @@ three points, each now checkable against a primary source:
    11.6.2.1 explains why this design sends no such header.
 3. **The version risk was overstated for the Interactions API.** M4.0 wrote that a
    stable `v1` was unconfirmed. Google documents the Interactions API as GA in
-   `v1` (S-5), and `/v1/interactions` is a documented route (S-3).
+   `v1` (S-5) **and** documents the `v1beta` route this design calls (S-3, S-15);
+   the two differ in label, not in the request or response shape used here.
 
 #### 11.6.2.1 `Api-Revision`: what it is and why this design does not send it
 
@@ -5825,11 +5836,11 @@ than of feature preference.
 | ------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------- | -------------- |
 | Vendor's own label              | **"now considered legacy"**                                   | **"new interface", "Generally Available"**                          | S-1            |
 | Recommendation for new projects | Not recommended; retained for existing integrations           | **"the recommended interface for all new projects"**                | S-1, S-4       |
-| Lifecycle state                 | Legacy but "fully supported"                                  | GA in `v1`; also in `v1beta`                                        | S-1, S-5       |
+| Lifecycle state                 | Legacy but "fully supported"                                  | GA in `v1`; also served on the `/v1beta` route this design calls    | S-1, S-5, S-15 |
 | Deprecation announced?          | **No.** Zero mentions on the deprecations page                | Not applicable (it is the successor)                                | S-9            |
 | Retirement date announced?      | **No.** **Official documentation unconfirmed**                | Not applicable                                                      | S-9            |
 | Where new capabilities launch   | Not the target surface                                        | "new models and capabilities … will launch on the Interactions API" | S-1            |
-| Stable `v1` route available     | **Official documentation unconfirmed** in the pages consulted | **Yes**: `POST /v1/interactions`                                    | S-3, S-5       |
+| Stable `v1` route available     | **Official documentation unconfirmed** in the pages consulted | **Yes**: `v1` is documented alongside the `/v1beta` route used here | S-3, S-5       |
 | Extra versioning axis           | None                                                          | `Api-Revision` appears in samples only; not in the reference        | S-2, S-3, S-13 |
 
 **Why "still supported" is not "suitable for a new project".** M4.0's third bullet
@@ -5854,7 +5865,7 @@ and the comparison below confirms the schemas are entirely different.
 | Element             | `generateContent`                                             | Interactions API                                             | Source        |
 | ------------------- | ------------------------------------------------------------- | ------------------------------------------------------------ | ------------- |
 | Host                | `generativelanguage.googleapis.com`                           | same                                                         | S-2, S-4      |
-| Path                | `/v1beta/models/{model}:generateContent`                      | `/v1/interactions` (stable) or `/v1beta/interactions`        | S-2, S-3, S-4 |
+| Path                | `/v1beta/models/{model}:generateContent`                      | `/v1beta/interactions` (adopted, §11.1.3)                    | S-2, S-15     |
 | Method              | `POST`                                                        | `POST`                                                       | S-2           |
 | Auth                | `x-goog-api-key`                                              | `x-goog-api-key`                                             | S-2, S-4      |
 | Content-Type        | `application/json`                                            | `application/json`                                           | S-4           |
@@ -5907,16 +5918,45 @@ Notes, each traceable to a source:
 - `stream` is not sent; it defaults to non-streaming, which is what Phase 4 needs
   (Section 11.6.4.4).
 
+#### 11.6.4.1a As-built consistency check (2026-11-26)
+
+The adapter was re-read against S-15 and S-2 to confirm this document and the code
+describe the same call. Every row below is a statement about the code as it stands,
+not an intention:
+
+| Item                 | Documented here (§11.1.3, §11.6.5)                                                                  | Implemented in                                    |
+| -------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Path                 | `/v1beta/interactions`                                                                              | `GEMINI_INTERACTIONS_PATH` (transport, adapter)   |
+| Auth header          | `x-goog-api-key`                                                                                    | transport `send()` only                           |
+| Content-Type         | `application/json`                                                                                  | adapter `send()` call                             |
+| Request body         | `model`, `input`, `system_instruction?`, `generation_config.max_output_tokens`, `store: false`      | `buildRequestBody()`                              |
+| Model ids            | `default` → `gemini-3.8-flash`, `fast` → `gemini-3.5-flash-lite`, `high-quality` → `gemini-4-argon` | `MODEL_IDS`                                       |
+| Text extraction      | `steps[type === 'model_output'].content[].text`                                                     | `extractText()`                                   |
+| Failure carrier      | `errors[]` on a 2xx `status: "failed"`; `error.code` on non-2xx                                     | `interactionFailureCode()` / `extractErrorCode()` |
+| Usage fields         | `usage.total_input_tokens`, `total_output_tokens`, `total_tokens`                                   | response mapping                                  |
+
+Two facts about S-15 that the adapter deliberately does not follow, both already
+decided above: the quickstart's `curl` sample sends `Api-Revision: 2026-05-20`
+(§11.6.2.1 declines it), and its example model is `gemini-4-hydrogen`, which is not
+one of the three ratified aliases (§11.1.1). The sample's endpoint, headers and
+response shape are what this design adopts.
+
 #### 11.6.4.2 Response handling
 
 ```text
-POST /v1/interactions
+POST /v1beta/interactions
   → 2xx: Interaction JSON
       status === 'completed' | 'incomplete' | 'failed' | ...
       steps[]: polymorphic; only type === 'model_output' contributes text
+      errors[]: [{ code, message }] — present when status === 'failed'
       usage:   total_input_tokens / total_output_tokens / total_tokens
   → non-2xx: { "error": { "code", "message" } }
 ```
+
+The two failure carriers are not interchangeable and the adapter reads both: a
+non-2xx response carries a single `error` object, while a 2xx response whose
+`status` is `failed` carries an `errors` **array**. Only the `code` string is used
+in either case, because the vendor `message` can quote prompt text (§11.6.6).
 
 #### 11.6.4.3 Truncation mapping — a substantive change from M4.0
 
@@ -5954,7 +5994,7 @@ as `invalid_response` — rather than silently joining steps across a second req
 | Synchronous request/response   | Yes               | Yes (default)                            | **Yes — only this** |
 | Streaming                      | Yes               | Yes (`stream: true`, SSE)                | No                  |
 | Background execution           | Not applicable    | Yes (`background: true`)                 | No                  |
-| Poll / fetch later             | Not applicable    | Yes (`GET /v1/interactions/{id}`)        | No                  |
+| Poll / fetch later             | Not applicable    | Yes (`GET /v1beta/interactions/{id}`)        | No                  |
 | Server-side conversation state | No (stateless)    | Yes (`previous_interaction_id`, `store`) | No                  |
 
 Sources: S-1, S-2, S-4.
@@ -6574,7 +6614,7 @@ added, removed or renumbered, and the counts do not change.**
 
 | Test  | Impact                  | Detail                                                                                                                         |
 | ----- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| T-10a | **Field paths only**    | Single-egress assertions are interface-agnostic. The recorded request is now `POST /v1/interactions`                           |
+| T-10a | **Field paths only**    | Single-egress assertions are interface-agnostic. The recorded request is now `POST /v1beta/interactions`                           |
 | T-11e | **None**                | Asserts lazy construction; independent of the interface                                                                        |
 | T-13  | **None**                | Timeout behaviour is transport-level                                                                                           |
 | T-14  | **None**                | Abort behaviour is transport-level                                                                                             |
@@ -6623,7 +6663,7 @@ than new rows, because each is a property of an already-covered behaviour:
 
 #### 11.6.12 Final recommendation
 
-**Adopt the Interactions API: `POST https://generativelanguage.googleapis.com/v1/interactions`.**
+**Adopt the Interactions API: `POST https://generativelanguage.googleapis.com/v1beta/interactions`.**
 
 The eight questions the milestone required answered:
 
@@ -6650,8 +6690,10 @@ The eight questions the milestone required answered:
 7. **New or modified test specs?** No new T-IDs. Two assertions are folded into
    T-10a and T-16c (§11.6.11).
 8. **Residual lifecycle risk after this choice?** **Reduced but not eliminated.**
-   The adopted surface is GA in `v1` and is where Google says new work goes, which
-   removes the "will this be retired" risk that hung over `generateContent`.
+   The adopted surface is where Google says new work goes (S-1), it is called on
+   the `/v1beta` route Google documents (S-2, S-15), and a stable `v1` route is
+   documented too (S-3). That removes the "will this be retired" risk that hung
+   over `generateContent`.
    Remaining risks are real and are recorded in §11.6.13 rather than waved away.
 
 **Why not keep `generateContent`.** It remains fully supported and would work
@@ -6680,15 +6722,16 @@ of which endpoint is called.
 | #   | Risk                                                                 | Severity | Mitigation / status                                                                    |
 | --- | -------------------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------- |
 | R-1 | **No retirement date for `generateContent` is published**            | Low      | Irrelevant to the adopted interface; recorded for completeness                         |
-| R-2 | **No retirement date for the Interactions API is published**         | Low      | It is GA in `v1`; `v1` is documented as supported for the major version's lifetime     |
+| R-2 | **No retirement date for the Interactions API is published**         | Low      | No date published; a stable `v1` route exists as a one-constant fallback (§11.1.3)     |
 | R-3 | **`Api-Revision` semantics are undocumented**                        | Low      | Not sent (§11.6.2.1). If it becomes required, one constant header                      |
 | R-4 | **Google may change `status` enum values**                           | Medium   | Unknown values map to `null`/`invalid_response`, never silently to `false` (§11.6.4.3) |
 | R-5 | **Model ids can be deprecated**                                      | Medium   | Alias indirection (§11.1.1); a dead id surfaces as `model_not_found`                   |
 | R-6 | **`store: false` is a privacy control the vendor could change**      | Medium   | Asserted in T-10a and locally in M4.2; a change would fail the suite loudly            |
 | R-7 | **The error taxonomy is documented for Interactions only**           | Low      | An advantage of the choice, but couples error mapping to one page                      |
 | R-8 | **The response schema differs from every `generateContent` example** | Medium   | Fully specified in §11.6.4–11.6.5; T-16c and T-17 assert the new paths                 |
+| R-9 | **The adopted route is `v1beta`, which Google documents as subject to change** | Medium | Accepted on the Owner's instruction (2026-11-26). The version is one constant per file; request and response shapes are shared with `v1`, so reverting is a two-line change (§11.1.3) |
 
-R-2 through R-8 are the honest cost of the choice. None of them is a reason to
+R-2 through R-9 are the honest cost of the choice. None of them is a reason to
 prefer the legacy surface, and each has a named control.
 
 **One risk is explicitly NOT introduced by this decision.** The interface change
@@ -6781,7 +6824,7 @@ makes no claim about consumer independence.
     the vendor response body must not reach an error message, a log line, or a
     propagated body (Section 11.1.4, Section 11.1.7). — T-18
 15. No new environment variable is required for the current deployment to boot.
-16. The adapter calls the adopted interface: exactly one `POST /v1/interactions`,
+16. The adapter calls the adopted interface: exactly one `POST /v1beta/interactions`,
     with `store: false` always present and no `temperature` key in the body, and
     with the response read from `steps[type=model_output]` and `status`. A request
     to any `generateContent` path fails the suite. — T-10a, T-16c, T-17
