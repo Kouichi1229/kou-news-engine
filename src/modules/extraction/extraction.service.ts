@@ -46,6 +46,16 @@ export interface ExtractionServiceOptions {
   onRequestIssued?: () => void;
   /** Injected for deterministic lease tokens in tests. */
   tokenFactory?: () => string;
+  /**
+   * Runs after a body has been stored successfully, with the article id and the
+   * exact text just written. Absent means body extraction only.
+   *
+   * Called at most once per article per run and only after the fenced write
+   * succeeded: there is nothing to summarise when the claim was lost or the body
+   * was never stored. A failure here must never undo the extraction, so it is
+   * caught and swallowed — the caller is expected to log it itself.
+   */
+  deriveArticle?: (articleId: string, text: string) => Promise<void>;
   concurrency?: number;
   timeoutMs?: number;
 }
@@ -259,7 +269,29 @@ export class ExtractionService {
       extractedAt,
     };
     const recorded = await this.options.repository.complete({ articleId, token, success });
-    return recorded ? 'extracted' : 'lost';
+    if (!recorded) {
+      return 'lost';
+    }
+
+    await this.deriveDerived(articleId, text);
+    return 'extracted';
+  }
+
+  /**
+   * Runs the post-extraction derivation hook.
+   *
+   * The body is already committed at this point, so nothing that happens here may
+   * change the extraction outcome: an exception is absorbed and the run continues.
+   */
+  private async deriveDerived(articleId: string, text: string): Promise<void> {
+    if (this.options.deriveArticle === undefined) {
+      return;
+    }
+    try {
+      await this.options.deriveArticle(articleId, text);
+    } catch {
+      // Absorbed by contract; the hook owns reporting.
+    }
   }
 
   /** Records a fetch failure, mapping the error to a stored code. */

@@ -9,6 +9,7 @@ import {
   openReadOnlyDatabase,
   type ReadOnlyDatabase,
 } from '../core/persistence/read-only.js';
+import type { DerivationProvider } from '../modules/derivation/derivation.bootstrap.js';
 import { systemClock, type Clock } from '../modules/extraction/clock.js';
 import { EXTRACTOR_VERSION } from '../modules/extraction/extraction.constants.js';
 import { ExtractionService } from '../modules/extraction/extraction.service.js';
@@ -61,6 +62,14 @@ export interface ExtractionCliDependencies {
   logger?: { info: (m: string, meta?: unknown) => void; warn: (m: string, meta?: unknown) => void };
   /** Where the preview line is written. Defaults to `process.stdout`. */
   writeStdout?: (line: string) => void;
+  /**
+   * The provider the derivation hook calls. Defaults to one built from the
+   * environment (`LLM_PROVIDER`, `LLM_MODEL`, `GEMINI_API_KEY`).
+   *
+   * Injected rather than read here so a test can script completions without a
+   * network or a credential.
+   */
+  provider?: DerivationProvider;
   /**
    * Set only by the entry point, and only for `--execute`.
    *
@@ -281,11 +290,20 @@ async function runExtraction(dependencies: ExtractionCliDependencies): Promise<n
     database = (dependencies.openDatabase ?? ((): SqliteDatabase => openDatabase()))();
 
     const repository = new SqliteArticleContentRepository(database);
+    const { createDerivationHook } = await import('../modules/derivation/derivation.bootstrap.js');
+    const derivationOption = await createDerivationHook({
+      database,
+      now: (): number => clock.now(),
+      log,
+      ...(dependencies.provider === undefined ? {} : { provider: dependencies.provider }),
+    });
+
     const service = new ExtractionService({
       repository,
       urls: new SqliteArticleUrlLookup(database),
       clock,
       isCancelled: (): boolean => cancellation.isCancelled(),
+      ...derivationOption,
     });
 
     const summary = await service.run();
