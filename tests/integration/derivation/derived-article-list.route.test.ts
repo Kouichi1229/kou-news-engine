@@ -19,17 +19,26 @@ const INSERT_DERIVED = `INSERT INTO article_derived
   (article_id, title_zh, summary_zh, category, created_at, updated_at)
   VALUES (?, ?, ?, ?, ?, ?)`;
 
-function insertDerived(articleId: string, updatedAt: string, titleZh = `標題 ${articleId}`): void {
+function insertDerived(
+  articleId: string,
+  updatedAt: string,
+  titleZh = `標題 ${articleId}`,
+  category: string | null = '財經',
+): void {
   database.query((connection) => {
     connection.all(INSERT_DERIVED, [
       articleId,
       titleZh,
       `${articleId} 的摘要內容。`,
-      '財經',
+      category,
       updatedAt,
       updatedAt,
     ]);
   });
+}
+
+function idsOf(body: { articles: Array<{ articleId: string }> }): string[] {
+  return body.articles.map((item) => item.articleId);
 }
 
 beforeEach(() => {
@@ -132,5 +141,130 @@ describe('GET /api/articles/derived', () => {
 
     expect(response.status).toBe(404);
     expect(response.body.error.code).toBe('NOT_FOUND');
+  });
+});
+
+describe('GET /api/articles/derived?category=', () => {
+  function seedThree(): void {
+    insertDerived('a1', '2026-02-01T00:00:00.000Z', '財經一', '財經');
+    insertDerived('a2', '2026-02-02T00:00:00.000Z', '科技一', '科技');
+    insertDerived('a3', '2026-02-03T00:00:00.000Z', '財經二', '財經');
+  }
+
+  it('returns only the articles of the named category', async () => {
+    seedThree();
+
+    const response = await request(app).get('/api/articles/derived?category=科技');
+
+    expect(response.status).toBe(200);
+    expect(idsOf(response.body)).toEqual(['a2']);
+    expect(response.body.articles[0]).toEqual({
+      articleId: 'a2',
+      titleZh: '科技一',
+      summaryZh: 'a2 的摘要內容。',
+      category: '科技',
+      updatedAt: '2026-02-02T00:00:00.000Z',
+    });
+  });
+
+  it('keeps the newest-first order within the filter', async () => {
+    seedThree();
+
+    const response = await request(app).get('/api/articles/derived?category=財經');
+
+    expect(response.status).toBe(200);
+    expect(idsOf(response.body)).toEqual(['a3', 'a1']);
+  });
+
+  it('answers an empty list for a valid category with no records', async () => {
+    seedThree();
+
+    const response = await request(app).get('/api/articles/derived?category=體育');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ articles: [] });
+  });
+
+  it('answers 400 for a category outside the list', async () => {
+    seedThree();
+
+    const response = await request(app).get('/api/articles/derived?category=運動');
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('BAD_REQUEST');
+    expect(response.body.error.message).toContain('體育');
+    // Rejected, not ignored: no list is served alongside the error.
+    expect(response.body.articles).toBeUndefined();
+  });
+
+  it('answers 400 for an empty category value', async () => {
+    seedThree();
+
+    const response = await request(app).get('/api/articles/derived?category=');
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('BAD_REQUEST');
+  });
+
+  it('answers 400 when the parameter is repeated', async () => {
+    seedThree();
+
+    const response = await request(app).get('/api/articles/derived?category=財經&category=科技');
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('BAD_REQUEST');
+  });
+
+  it('serves every article when no category is given', async () => {
+    seedThree();
+
+    const response = await request(app).get('/api/articles/derived');
+
+    expect(response.status).toBe(200);
+    expect(idsOf(response.body)).toEqual(['a3', 'a2', 'a1']);
+  });
+
+  it('leaves an unclassified legacy record out of every filtered list', async () => {
+    insertDerived('a1', '2026-02-01T00:00:00.000Z', '財經', '財經');
+    insertDerived('a2', '2026-02-02T00:00:00.000Z', '舊資料', null);
+
+    const unfiltered = await request(app).get('/api/articles/derived');
+    const filtered = await request(app).get('/api/articles/derived?category=財經');
+
+    // Visible in the unfiltered feed, with its null category stated as such.
+    expect(idsOf(unfiltered.body)).toEqual(['a2', 'a1']);
+    expect(unfiltered.body.articles[0].category).toBeNull();
+    // And in no filtered list, because null is not membership of any category.
+    expect(idsOf(filtered.body)).toEqual(['a1']);
+  });
+
+  it('applies the record ceiling to the filtered list too', async () => {
+    // Twice the ceiling, so the half that matches the filter is still too many.
+    const total = (DERIVED_ARTICLE_LIST_LIMIT + 10) * 2;
+    database.query((connection) => {
+      for (let index = 0; index < total; index += 1) {
+        const id = `a${String(index).padStart(3, '0')}`;
+        const updatedAt = new Date(Date.UTC(2026, 1, 1, 0, index)).toISOString();
+        // Every other row is 科技, so the 財經 filter has to skip more than the
+        // ceiling is worth of rows and still stop at the ceiling.
+        connection.all(INSERT_DERIVED, [
+          id,
+          `標題 ${id}`,
+          `摘要 ${id}`,
+          index % 2 === 0 ? '財經' : '科技',
+          updatedAt,
+          updatedAt,
+        ]);
+      }
+    });
+
+    const response = await request(app).get('/api/articles/derived?category=財經');
+
+    expect(response.status).toBe(200);
+    expect(response.body.articles).toHaveLength(DERIVED_ARTICLE_LIST_LIMIT);
+    expect(idsOf(response.body)[0]).toBe(`a${String(total - 2).padStart(3, '0')}`);
+    expect(
+      response.body.articles.every((item: { category: string }) => item.category === '財經'),
+    ).toBe(true);
   });
 });

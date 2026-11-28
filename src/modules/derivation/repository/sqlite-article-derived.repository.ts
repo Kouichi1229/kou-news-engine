@@ -5,6 +5,24 @@ import type {
   ArticleDerivedRepository,
 } from './article-derived.repository.js';
 
+const RECENT_SELECT = `SELECT article_id, title_zh, summary_zh, category, updated_at
+   FROM article_derived`;
+
+const RECENT_SQL = `${RECENT_SELECT}
+  ORDER BY updated_at DESC, article_id ASC
+  LIMIT ?`;
+
+/**
+ * The filtered list.
+ *
+ * `category = ?` never matches a NULL row, which is the intent: a record derived
+ * before categories existed is not a member of any filtered list.
+ */
+const RECENT_BY_CATEGORY_SQL = `${RECENT_SELECT}
+  WHERE category = ?
+  ORDER BY updated_at DESC, article_id ASC
+  LIMIT ?`;
+
 /**
  * The `article_derived` table.
  *
@@ -56,15 +74,14 @@ export class SqliteArticleDerivedRepository implements ArticleDerivedRepository 
     };
   }
 
-  async listRecent(limit: number): Promise<readonly ArticleDerivedDraft[]> {
+  async listRecent(
+    limit: number,
+    category?: DerivationCategory,
+  ): Promise<readonly ArticleDerivedDraft[]> {
     const rows = this.database.query((connection) =>
-      connection.all(
-        `SELECT article_id, title_zh, summary_zh, category, updated_at
-           FROM article_derived
-          ORDER BY updated_at DESC, article_id ASC
-          LIMIT ?`,
-        [limit],
-      ),
+      category === undefined
+        ? connection.all(RECENT_SQL, [limit])
+        : connection.all(RECENT_BY_CATEGORY_SQL, [category, limit]),
     ) as Array<{
       article_id: string;
       title_zh: string;

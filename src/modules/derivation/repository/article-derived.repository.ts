@@ -42,8 +42,12 @@ export interface ArticleDerivedRepository {
    * Ordered by `updated_at`, tie-broken by `article_id`, so two records written in
    * the same millisecond still come back in a stable order. The limit is the
    * caller's: this boundary does not decide how much is too much.
+   *
+   * `category` narrows the list to one label. Records stored before categories
+   * existed hold `null` and therefore match no label: an unclassified record is not
+   * evidence of any category, so it belongs only in the unfiltered list.
    */
-  listRecent(limit: number): Promise<readonly ArticleDerivedDraft[]>;
+  listRecent(limit: number, category?: DerivationCategory): Promise<readonly ArticleDerivedDraft[]>;
 
   /**
    * Stores the derived record, replacing an earlier one for the same article.

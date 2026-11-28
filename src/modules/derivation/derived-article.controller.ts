@@ -5,6 +5,7 @@ import type {
   DerivedArticleListResponse,
   DerivedArticleResponse,
 } from '../../types/api.js';
+import { DERIVATION_CATEGORIES, type DerivationCategory } from './derivation.service.js';
 import type {
   ArticleDerivedDraft,
   ArticleDerivedRepository,
@@ -31,17 +32,60 @@ function toResponse(draft: ArticleDerivedDraft): DerivedArticleResponse {
 export const DERIVED_ARTICLE_LIST_LIMIT = 50;
 
 /**
- * Serves the most recently updated derived records.
+ * Reads the `?category=` filter.
+ *
+ * Three distinct answers, because the caller must tell them apart:
+ *
+ * - `undefined` — no filter was asked for, so serve the whole list;
+ * - `null` — a filter was asked for and it is not one of the nine labels;
+ * - a label — narrow the list to it.
+ *
+ * A repeated parameter arrives as an array and is rejected with everything else
+ * unknown: guessing which of two filters a client meant would answer a question
+ * nobody asked. The value is matched exactly, without trimming, so a stray space
+ * is a rejected filter rather than a silently different one.
+ */
+function readCategoryFilter(raw: unknown): DerivationCategory | null | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  return (DERIVATION_CATEGORIES as readonly string[]).includes(raw)
+    ? (raw as DerivationCategory)
+    : null;
+}
+
+/**
+ * Serves the most recently updated derived records, optionally one category.
  *
  * An empty database is a 200 with an empty list, not a 404: the collection exists
  * and is simply empty, which is a different answer from "this article has no
  * record".
+ *
+ * An unknown `category` is a 400, not an empty 200: an ignored filter reads to the
+ * client as "this category has no articles", which is a claim the server has not
+ * checked. The same ceiling and ordering apply either way.
  */
 export function createDerivedArticleListController(
   repository: ArticleDerivedRepository,
 ): RequestHandler {
-  return (_req: Request, res: Response, next): void => {
-    repository.listRecent(DERIVED_ARTICLE_LIST_LIMIT).then(
+  return (req: Request, res: Response, next): void => {
+    const category = readCategoryFilter(req.query['category']);
+
+    if (category === null) {
+      const body: ApiErrorBody = {
+        error: {
+          code: 'BAD_REQUEST',
+          message: `Unknown category. Expected one of: ${DERIVATION_CATEGORIES.join(', ')}`,
+        },
+      };
+      res.status(400).json(body);
+      return;
+    }
+
+    repository.listRecent(DERIVED_ARTICLE_LIST_LIMIT, category).then(
       (drafts) => {
         const body: DerivedArticleListResponse = { articles: drafts.map(toResponse) };
         res.status(200).json(body);
