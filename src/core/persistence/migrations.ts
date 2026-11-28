@@ -596,6 +596,27 @@ export const NOTIFICATION_DELIVERY_MIGRATION: Migration = {
   ],
 };
 
+/**
+ * The category the model chose, added to the record that already exists.
+ *
+ * Nullable on purpose. Every row written before this migration was derived without
+ * a category, and there is no honest value to backfill: inventing one would claim a
+ * classification nobody made. New writes always carry a category, and the CHECK is
+ * what keeps the column's vocabulary closed in the store as well as in the parser.
+ */
+export const ARTICLE_DERIVED_CATEGORY_MIGRATION: Migration = {
+  version: 9,
+  name: 'article_derived_category',
+  statements: [
+    `ALTER TABLE article_derived
+       ADD COLUMN category TEXT
+       CHECK (
+         category IS NULL
+         OR category IN ('國際','政治','財經','科技','社會','生活','健康','娛樂','體育')
+       )`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   INITIAL_MIGRATION,
   INSERTION_ORDER_AND_PRIMARY_SOURCE_MIGRATION,
@@ -605,6 +626,7 @@ export const MIGRATIONS: readonly Migration[] = [
   ARTICLE_DERIVED_MIGRATION,
   ARTICLE_CONTENTS_BODY_RETENTION_MIGRATION,
   NOTIFICATION_DELIVERY_MIGRATION,
+  ARTICLE_DERIVED_CATEGORY_MIGRATION,
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {

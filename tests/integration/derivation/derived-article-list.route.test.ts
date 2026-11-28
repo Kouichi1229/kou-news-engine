@@ -16,8 +16,8 @@ let database: SqliteDatabase;
 let app: ReturnType<typeof createApp>;
 
 const INSERT_DERIVED = `INSERT INTO article_derived
-  (article_id, title_zh, summary_zh, created_at, updated_at)
-  VALUES (?, ?, ?, ?, ?)`;
+  (article_id, title_zh, summary_zh, category, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?)`;
 
 function insertDerived(articleId: string, updatedAt: string, titleZh = `標題 ${articleId}`): void {
   database.query((connection) => {
@@ -25,6 +25,7 @@ function insertDerived(articleId: string, updatedAt: string, titleZh = `標題 $
       articleId,
       titleZh,
       `${articleId} 的摘要內容。`,
+      '財經',
       updatedAt,
       updatedAt,
     ]);
@@ -48,7 +49,7 @@ describe('GET /api/articles/derived', () => {
     expect(response.body).toEqual({ articles: [] });
   });
 
-  it('returns every derived record with its four fields', async () => {
+  it('returns every derived record with its five fields', async () => {
     insertDerived('a1', '2026-02-01T00:00:00.000Z', '第一篇標題');
     insertDerived('a2', '2026-02-02T00:00:00.000Z', '第二篇標題');
 
@@ -60,6 +61,7 @@ describe('GET /api/articles/derived', () => {
       articleId: 'a1',
       titleZh: '第一篇標題',
       summaryZh: 'a1 的摘要內容。',
+      category: '財經',
       updatedAt: '2026-02-01T00:00:00.000Z',
     });
   });
@@ -100,7 +102,14 @@ describe('GET /api/articles/derived', () => {
         // `a000`..`a059`, one minute apart so the newest is `a059`.
         const id = `a${String(index).padStart(3, '0')}`;
         const updatedAt = new Date(Date.UTC(2026, 1, 1, 0, index)).toISOString();
-        connection.all(INSERT_DERIVED, [id, `標題 ${id}`, `摘要 ${id}`, updatedAt, updatedAt]);
+        connection.all(INSERT_DERIVED, [
+          id,
+          `標題 ${id}`,
+          `摘要 ${id}`,
+          '財經',
+          updatedAt,
+          updatedAt,
+        ]);
       }
     });
 

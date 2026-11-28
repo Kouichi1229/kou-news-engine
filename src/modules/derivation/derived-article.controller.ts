@@ -15,6 +15,7 @@ function toResponse(draft: ArticleDerivedDraft): DerivedArticleResponse {
     articleId: draft.articleId,
     titleZh: draft.titleZh,
     summaryZh: draft.summaryZh,
+    category: draft.category,
     updatedAt: draft.at,
   };
 }

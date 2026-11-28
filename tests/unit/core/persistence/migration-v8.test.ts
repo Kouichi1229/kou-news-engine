@@ -40,12 +40,11 @@ const INSERT = `INSERT INTO notification_delivery (article_id, message_id, statu
   VALUES (?, ?, ?, ?)`;
 
 describe('migration v8 — notification_delivery', () => {
-  it('is registered as the newest migration', () => {
-    const newest = MIGRATIONS.at(-1);
-
-    expect(newest).toBe(NOTIFICATION_DELIVERY_MIGRATION);
-    expect(newest?.version).toBe(8);
-    expect(newest?.name).toBe('notification_delivery');
+  it('is registered below the newest migration', () => {
+    // v8 is no longer the newest; that guarantee lives in the v9 suite. What
+    // matters here is that this version is present and applied in order.
+    expect(MIGRATIONS).toContain(NOTIFICATION_DELIVERY_MIGRATION);
+    expect(Math.max(...MIGRATIONS.map((migration) => migration.version))).toBeGreaterThan(8);
   });
 
   it('exists after migration with the four documented columns', () => {

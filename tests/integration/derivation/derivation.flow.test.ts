@@ -4,6 +4,7 @@ import { FakeProvider } from '../../../src/core/llm/fake.provider.js';
 import { openDatabase, type SqliteDatabase } from '../../../src/core/persistence/sqlite.js';
 import {
   ArticleDerivationService,
+  DERIVATION_CATEGORIES,
   DERIVATION_LIMITS,
 } from '../../../src/modules/derivation/derivation.service.js';
 import { createDerivationHook } from '../../../src/modules/derivation/derivation.bootstrap.js';
@@ -34,8 +35,16 @@ function summaryOf(chars: number): string {
   return '這'.repeat(chars);
 }
 
-function modelReply(summaryChars = 120, titleZh = '繁體中文標題'): string {
-  return JSON.stringify({ title_zh: titleZh, summary_zh: summaryOf(summaryChars) });
+function modelReply(
+  summaryChars = 120,
+  titleZh = '繁體中文標題',
+  category: string = '財經',
+): string {
+  return JSON.stringify({
+    title_zh: titleZh,
+    summary_zh: summaryOf(summaryChars),
+    category,
+  });
 }
 
 function insertArticle(id: string, order = 1, title = 'Original English Title'): void {
@@ -123,6 +132,7 @@ describe('extraction → derivation → article_derived', () => {
         article_id: 'a1',
         title_zh: 'AI 模型發布',
         summary_zh: summaryOf(120),
+        category: '財經',
         created_at: '2026-02-01T00:00:00.000Z',
         updated_at: '2026-02-01T00:00:00.000Z',
       },
@@ -477,12 +487,14 @@ describe('ArticleDerivationService — output contract', () => {
       articleId: 'a1',
       titleZh: '第一版標題',
       summaryZh: summaryOf(110),
+      category: '財經',
       at: '2026-02-01T00:00:00.000Z',
     });
     await derived.save({
       articleId: 'a1',
       titleZh: '第二版標題',
       summaryZh: summaryOf(110),
+      category: '科技',
       at: '2026-03-01T00:00:00.000Z',
     });
 
@@ -491,6 +503,7 @@ describe('ArticleDerivationService — output contract', () => {
         article_id: 'a1',
         title_zh: '第二版標題',
         summary_zh: summaryOf(110),
+        category: '科技',
         created_at: '2026-02-01T00:00:00.000Z',
         updated_at: '2026-03-01T00:00:00.000Z',
       },
@@ -524,6 +537,7 @@ describe('ArticleDerivationService — output contract', () => {
         article_id: 'a1',
         title_zh: '第一版標題',
         summary_zh: summaryOf(110),
+        category: '財經',
         created_at: '2026-02-01T00:00:00.000Z',
         updated_at: '2026-02-01T00:00:00.000Z',
       },
@@ -555,12 +569,14 @@ describe('SqliteArticleDerivedRepository — findByArticleId', () => {
       articleId: 'a1',
       titleZh: '第一版標題',
       summaryZh: summaryOf(110),
+      category: '財經',
       at: '2026-02-01T00:00:00.000Z',
     });
     await derived.save({
       articleId: 'a1',
       titleZh: '第二版標題',
       summaryZh: summaryOf(120),
+      category: '科技',
       at: '2026-03-01T00:00:00.000Z',
     });
 
@@ -568,6 +584,7 @@ describe('SqliteArticleDerivedRepository — findByArticleId', () => {
       articleId: 'a1',
       titleZh: '第二版標題',
       summaryZh: summaryOf(120),
+      category: '科技',
       at: '2026-03-01T00:00:00.000Z',
     });
   });
@@ -602,6 +619,7 @@ describe('createDerivationHook — the wiring the extraction CLI uses', () => {
         article_id: 'a1',
         title_zh: '注入的標題',
         summary_zh: summaryOf(120),
+        category: '財經',
         created_at: '2026-02-01T00:00:00.000Z',
         updated_at: '2026-02-01T00:00:00.000Z',
       },
@@ -666,6 +684,7 @@ describe('regenerate — the explicit replacement entry', () => {
       articleId: 'a1',
       titleZh: '第二版標題',
       summaryZh: summaryOf(140),
+      category: '財經',
       at: SECOND,
     });
     expect(derivedRows()).toEqual([
@@ -673,6 +692,7 @@ describe('regenerate — the explicit replacement entry', () => {
         article_id: 'a1',
         title_zh: '第二版標題',
         summary_zh: summaryOf(140),
+        category: '財經',
         created_at: FIRST,
         updated_at: SECOND,
       },
@@ -685,6 +705,7 @@ describe('regenerate — the explicit replacement entry', () => {
       articleId: 'a1',
       titleZh: '第一版標題',
       summaryZh: summaryOf(110),
+      category: '財經' as const,
       at: FIRST,
     };
     await derived.save(stored);
@@ -697,6 +718,7 @@ describe('regenerate — the explicit replacement entry', () => {
         article_id: 'a1',
         title_zh: '第一版標題',
         summary_zh: summaryOf(110),
+        category: '財經',
         created_at: FIRST,
         updated_at: FIRST,
       },
@@ -709,6 +731,7 @@ describe('regenerate — the explicit replacement entry', () => {
       articleId: 'a1',
       titleZh: '第一版標題',
       summaryZh: summaryOf(110),
+      category: '財經',
       at: FIRST,
     });
     const provider = new FakeProvider({
@@ -724,6 +747,7 @@ describe('regenerate — the explicit replacement entry', () => {
         article_id: 'a1',
         title_zh: '第一版標題',
         summary_zh: summaryOf(110),
+        category: '財經',
         created_at: FIRST,
         updated_at: FIRST,
       },
@@ -736,6 +760,7 @@ describe('regenerate — the explicit replacement entry', () => {
       articleId: 'a1',
       titleZh: '第一版標題',
       summaryZh: summaryOf(110),
+      category: '財經',
       at: FIRST,
     });
     database.query((connection) => {
@@ -763,5 +788,104 @@ describe('regenerate — the explicit replacement entry', () => {
         created_at: '2026-02-02T00:00:00.000Z',
       },
     ]);
+  });
+});
+
+describe('category — the closed list reaches the row', () => {
+  it('stores the category the model chose', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [{ kind: 'success', text: modelReply(110, '標題', '體育') }],
+    });
+
+    const draft = await derivation(provider).derive('a1', BODY);
+
+    expect(draft.category).toBe('體育');
+    expect(derivedRows()[0]?.['category']).toBe('體育');
+  });
+
+  it('writes no row when the model answers with a category outside the list', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [{ kind: 'success', text: modelReply(110, '標題', '運動') }],
+    });
+
+    await expect(derivation(provider).derive('a1', BODY)).rejects.toMatchObject({
+      reason: 'invalid-output',
+    });
+
+    expect(derivedRows()).toEqual([]);
+  });
+
+  it('keeps the previous category when a regeneration is rejected', async () => {
+    insertArticle('a1');
+    await derived.save({
+      articleId: 'a1',
+      titleZh: '第一版標題',
+      summaryZh: summaryOf(110),
+      category: '財經',
+      at: '2026-02-01T00:00:00.000Z',
+    });
+    const provider = new FakeProvider({
+      responses: [{ kind: 'success', text: modelReply(110, '第二版標題', '不存在') }],
+    });
+
+    await expect(
+      new ArticleDerivationService({
+        provider,
+        repository: derived,
+        now: () => Date.parse('2026-03-01T00:00:00Z'),
+      }).regenerate('a1', BODY),
+    ).rejects.toMatchObject({ reason: 'invalid-output' });
+
+    expect(derivedRows()).toEqual([
+      {
+        article_id: 'a1',
+        title_zh: '第一版標題',
+        summary_zh: summaryOf(110),
+        category: '財經',
+        created_at: '2026-02-01T00:00:00.000Z',
+        updated_at: '2026-02-01T00:00:00.000Z',
+      },
+    ]);
+  });
+
+  it('replaces the category along with the text on a successful regeneration', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [
+        { kind: 'success', text: modelReply(110, '第一版標題', '財經') },
+        { kind: 'success', text: modelReply(110, '第二版標題', '健康') },
+      ],
+    });
+    await new ArticleDerivationService({
+      provider,
+      repository: derived,
+      now: () => Date.parse('2026-02-01T00:00:00Z'),
+    }).derive('a1', BODY);
+
+    await new ArticleDerivationService({
+      provider,
+      repository: derived,
+      now: () => Date.parse('2026-03-01T00:00:00Z'),
+    }).regenerate('a1', BODY);
+
+    expect(derivedRows()[0]?.['category']).toBe('健康');
+    expect(derivedRows()[0]?.['title_zh']).toBe('第二版標題');
+  });
+
+  it('accepts every category in the list through the storage layer', async () => {
+    insertArticle('a1');
+    for (const [index, category] of DERIVATION_CATEGORIES.entries()) {
+      await derived.save({
+        articleId: `a${String(index)}`,
+        titleZh: `標題 ${category}`,
+        summaryZh: summaryOf(110),
+        category,
+        at: '2026-02-01T00:00:00.000Z',
+      });
+    }
+
+    expect(derivedRows().map((row) => row['category'])).toEqual([...DERIVATION_CATEGORIES]);
   });
 });

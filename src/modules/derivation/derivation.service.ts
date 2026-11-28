@@ -7,6 +7,27 @@ import type {
 } from './repository/article-derived.repository.js';
 
 /**
+ * The closed category list the model must choose from.
+ *
+ * A fixed list rather than free text: a downstream consumer can group by it, and a
+ * model that invents a label is rejected instead of stored. Traditional Chinese is
+ * the interface language throughout, so the values are the labels themselves.
+ */
+export const DERIVATION_CATEGORIES = [
+  '國際',
+  '政治',
+  '財經',
+  '科技',
+  '社會',
+  '生活',
+  '健康',
+  '娛樂',
+  '體育',
+] as const;
+
+export type DerivationCategory = (typeof DERIVATION_CATEGORIES)[number];
+
+/**
  * The output contract for one derivation call.
  *
  * `summaryChars` is the range the prompt asks for and the range the caller
@@ -51,6 +72,9 @@ export class DerivationError extends Error {
 const outputSchema = z.object({
   title_zh: z.string().trim().min(1).max(DERIVATION_LIMITS.maxTitleChars),
   summary_zh: z.string().trim().min(1),
+  // `z.enum` is the whole validation: a label outside the list fails the parse, so
+  // nothing is stored rather than a near-miss being mapped onto a real category.
+  category: z.enum(DERIVATION_CATEGORIES),
 });
 
 const SYSTEM_INSTRUCTION =
@@ -75,12 +99,13 @@ function buildPrompt(title: string, text: string): string {
     body,
     '',
     '請輸出下列 JSON，不要有其他文字：',
-    '{"title_zh":"繁體中文標題","summary_zh":"繁體中文摘要"}',
+    '{"title_zh":"繁體中文標題","summary_zh":"繁體中文摘要","category":"分類"}',
     '',
     '規則：',
     '1. 一律使用繁體中文（台灣用語）。',
     `2. summary_zh 必須是 ${DERIVATION_LIMITS.minSummaryChars} 至 ${DERIVATION_LIMITS.maxSummaryChars} 字。`,
-    '3. 只輸出 JSON。',
+    `3. category 只能從下列清單擇一：${DERIVATION_CATEGORIES.join('、')}。`,
+    '4. 只輸出 JSON。',
   ].join('\n');
 }
 
@@ -93,7 +118,11 @@ function buildPrompt(title: string, text: string): string {
  * holding `''`. Any other deviation is a rejection too, so a malformed answer is
  * never written as if it were a summary.
  */
-export function parseDerivationOutput(raw: string): { titleZh: string; summaryZh: string } {
+export function parseDerivationOutput(raw: string): {
+  titleZh: string;
+  summaryZh: string;
+  category: DerivationCategory;
+} {
   const unfenced = raw
     .trim()
     .replace(/^```(?:json)?\s*/i, '')
@@ -127,7 +156,7 @@ export function parseDerivationOutput(raw: string): { titleZh: string; summaryZh
     );
   }
 
-  return { titleZh, summaryZh };
+  return { titleZh, summaryZh, category: result.data.category };
 }
 
 export interface ArticleDerivationDeps {
@@ -208,11 +237,12 @@ export class ArticleDerivationService {
       maxOutputTokens: this.deps.maxOutputTokens ?? DERIVATION_LIMITS.maxOutputTokens,
     });
 
-    const { titleZh, summaryZh } = parseDerivationOutput(response.text);
+    const { titleZh, summaryZh, category } = parseDerivationOutput(response.text);
     const draft: ArticleDerivedDraft = {
       articleId,
       titleZh,
       summaryZh,
+      category,
       at: new Date(this.deps.now?.() ?? Date.now()).toISOString(),
     };
 

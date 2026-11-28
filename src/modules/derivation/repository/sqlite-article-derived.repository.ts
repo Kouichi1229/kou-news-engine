@@ -1,4 +1,5 @@
 import type { SqliteDatabase } from '../../../core/persistence/sqlite.js';
+import type { DerivationCategory } from '../derivation.service.js';
 import type {
   ArticleDerivedDraft,
   ArticleDerivedRepository,
@@ -28,13 +29,20 @@ export class SqliteArticleDerivedRepository implements ArticleDerivedRepository 
   async findByArticleId(articleId: string): Promise<ArticleDerivedDraft | undefined> {
     const row = this.database.query((connection) =>
       connection.get(
-        `SELECT article_id, title_zh, summary_zh, updated_at
+        `SELECT article_id, title_zh, summary_zh, category, updated_at
            FROM article_derived
           WHERE article_id = ?`,
         [articleId],
       ),
     ) as
-      { article_id: string; title_zh: string; summary_zh: string; updated_at: string } | undefined;
+      | {
+          article_id: string;
+          title_zh: string;
+          summary_zh: string;
+          category: string | null;
+          updated_at: string;
+        }
+      | undefined;
 
     if (row === undefined) {
       return undefined;
@@ -43,6 +51,7 @@ export class SqliteArticleDerivedRepository implements ArticleDerivedRepository 
       articleId: row.article_id,
       titleZh: row.title_zh,
       summaryZh: row.summary_zh,
+      category: row.category as DerivationCategory | null,
       at: row.updated_at,
     };
   }
@@ -50,7 +59,7 @@ export class SqliteArticleDerivedRepository implements ArticleDerivedRepository 
   async listRecent(limit: number): Promise<readonly ArticleDerivedDraft[]> {
     const rows = this.database.query((connection) =>
       connection.all(
-        `SELECT article_id, title_zh, summary_zh, updated_at
+        `SELECT article_id, title_zh, summary_zh, category, updated_at
            FROM article_derived
           ORDER BY updated_at DESC, article_id ASC
           LIMIT ?`,
@@ -60,6 +69,7 @@ export class SqliteArticleDerivedRepository implements ArticleDerivedRepository 
       article_id: string;
       title_zh: string;
       summary_zh: string;
+      category: string | null;
       updated_at: string;
     }>;
 
@@ -67,6 +77,7 @@ export class SqliteArticleDerivedRepository implements ArticleDerivedRepository 
       articleId: row.article_id,
       titleZh: row.title_zh,
       summaryZh: row.summary_zh,
+      category: row.category as DerivationCategory | null,
       at: row.updated_at,
     }));
   }
@@ -74,13 +85,15 @@ export class SqliteArticleDerivedRepository implements ArticleDerivedRepository 
   async save(draft: ArticleDerivedDraft): Promise<void> {
     this.database.query((connection) => {
       connection.all(
-        `INSERT INTO article_derived (article_id, title_zh, summary_zh, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO article_derived
+           (article_id, title_zh, summary_zh, category, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (article_id) DO UPDATE
            SET title_zh   = excluded.title_zh,
                summary_zh = excluded.summary_zh,
+               category   = excluded.category,
                updated_at = excluded.updated_at`,
-        [draft.articleId, draft.titleZh, draft.summaryZh, draft.at, draft.at],
+        [draft.articleId, draft.titleZh, draft.summaryZh, draft.category, draft.at, draft.at],
       );
     });
   }

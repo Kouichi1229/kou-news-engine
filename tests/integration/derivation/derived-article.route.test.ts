@@ -26,12 +26,19 @@ function insertArticle(id: string, order = 1): void {
   });
 }
 
-function insertDerived(articleId: string, titleZh: string, summaryZh: string, at: string): void {
+function insertDerived(
+  articleId: string,
+  titleZh: string,
+  summaryZh: string,
+  at: string,
+  category: string | null = '財經',
+): void {
   database.query((connection) => {
     connection.all(
-      `INSERT INTO article_derived (article_id, title_zh, summary_zh, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)`,
-      [articleId, titleZh, summaryZh, at, at],
+      `INSERT INTO article_derived
+         (article_id, title_zh, summary_zh, category, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [articleId, titleZh, summaryZh, category, at, at],
     );
   });
 }
@@ -62,8 +69,20 @@ describe('GET /api/articles/:articleId/derived', () => {
       articleId: 'a1',
       titleZh: '繁體中文標題',
       summaryZh: '這是一段繁體中文摘要，長度符合契約要求。',
+      category: '財經',
       updatedAt: '2026-02-01T00:00:00.000Z',
     });
+  });
+
+  it('reports a null category for a record derived before categories existed', async () => {
+    insertArticle('a1');
+    insertDerived('a1', '舊標題', '舊摘要內容。', '2026-02-01T00:00:00.000Z', null);
+
+    const response = await request(app).get('/api/articles/a1/derived');
+
+    expect(response.status).toBe(200);
+    // Null, not a made-up label: nobody classified this record.
+    expect(response.body.category).toBeNull();
   });
 
   it('answers with the latest write, not the first one', async () => {

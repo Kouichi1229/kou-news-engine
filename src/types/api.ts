@@ -1,3 +1,5 @@
+import type { DerivationCategory } from '../modules/derivation/derivation.service.js';
+
 export interface ApiErrorBody {
   error: {
     code: string;
@@ -29,6 +31,8 @@ export interface DerivedArticleResponse {
   articleId: string;
   titleZh: string;
   summaryZh: string;
+  /** One of the nine fixed categories, or `null` for a record derived before they existed. */
+  category: DerivationCategory | null;
   /** When this record was last written, ISO 8601. */
   updatedAt: string;
 }

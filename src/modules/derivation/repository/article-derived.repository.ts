@@ -1,3 +1,5 @@
+import type { DerivationCategory } from '../derivation.service.js';
+
 /**
  * Storage boundary for the AI-derived record.
  *
@@ -10,6 +12,12 @@ export interface ArticleDerivedDraft {
   readonly articleId: string;
   readonly titleZh: string;
   readonly summaryZh: string;
+  /**
+   * One of the nine fixed categories, or `null` for a record derived before the
+   * category existed. Nullable rather than defaulted: labelling a legacy row with a
+   * category nobody chose would be a fabricated fact.
+   */
+  readonly category: DerivationCategory | null;
   /** ISO 8601. Written to `created_at` once and to `updated_at` on every write. */
   readonly at: string;
 }

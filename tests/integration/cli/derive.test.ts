@@ -69,9 +69,10 @@ function seedArticle(database: SqliteDatabase, id: string, withBody: boolean): v
 function seedDerived(database: SqliteDatabase, id: string, titleZh: string): void {
   database.query((connection) => {
     connection.all(
-      `INSERT INTO article_derived (article_id, title_zh, summary_zh, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)`,
-      [id, titleZh, '這'.repeat(110), FIRST, FIRST],
+      `INSERT INTO article_derived
+         (article_id, title_zh, summary_zh, category, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, titleZh, '這'.repeat(110), '財經', FIRST, FIRST],
     );
   });
 }
@@ -84,8 +85,12 @@ function derivedRows(path: string): Array<Record<string, unknown>> {
   ) as Array<Record<string, unknown>>;
 }
 
-function reply(summaryChars: number, titleZh: string): string {
-  return JSON.stringify({ title_zh: titleZh, summary_zh: '這'.repeat(summaryChars) });
+function reply(summaryChars: number, titleZh: string, category = '財經'): string {
+  return JSON.stringify({
+    title_zh: titleZh,
+    summary_zh: '這'.repeat(summaryChars),
+    category,
+  });
 }
 
 interface Captured {
@@ -131,6 +136,7 @@ describe('derive CLI — regeneration', () => {
       articleId: 'a1',
       titleZh: '第二版',
       summaryZh: '這'.repeat(120),
+      category: '財經',
     });
     expect(result.stderr).toEqual([]);
     // The prompt carried the stored body: nothing was fetched to get it.
@@ -140,6 +146,7 @@ describe('derive CLI — regeneration', () => {
         article_id: 'a1',
         title_zh: '第二版',
         summary_zh: '這'.repeat(120),
+        category: '財經',
         created_at: FIRST,
         updated_at: SECOND,
       },
@@ -270,6 +277,7 @@ describe('derive CLI — a failed regeneration keeps the old text', () => {
         article_id: 'a1',
         title_zh: '第一版標題',
         summary_zh: '這'.repeat(110),
+        category: '財經',
         created_at: FIRST,
         updated_at: FIRST,
       },
@@ -293,6 +301,7 @@ describe('derive CLI — a failed regeneration keeps the old text', () => {
         article_id: 'a1',
         title_zh: '第一版標題',
         summary_zh: '這'.repeat(110),
+        category: '財經',
         created_at: FIRST,
         updated_at: FIRST,
       },

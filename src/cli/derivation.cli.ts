@@ -119,6 +119,7 @@ export async function runDerivationCli(dependencies: DerivationCliDependencies):
         articleId: draft.articleId,
         titleZh: draft.titleZh,
         summaryZh: draft.summaryZh,
+        category: draft.category,
       }),
     );
     log.info('Article derivation regenerated', {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  DERIVATION_CATEGORIES,
   DERIVATION_LIMITS,
   DerivationError,
   parseDerivationOutput,
@@ -15,8 +16,14 @@ import {
  */
 const SUMMARY_ZH = '台'.repeat(DERIVATION_LIMITS.minSummaryChars);
 
+/**
+ * A completion as the prompt asks for it, with `category` defaulted.
+ *
+ * The default lets a case override it to prove a bad label is rejected, while every
+ * other case stays about the field it names.
+ */
 function reply(fields: Record<string, unknown>): string {
-  return JSON.stringify(fields);
+  return JSON.stringify({ category: '財經', ...fields });
 }
 
 function parseFailure(raw: string): unknown {
@@ -34,7 +41,11 @@ describe('parseDerivationOutput — accepted output', () => {
       reply({ title_zh: '台積電公布第三季財報', summary_zh: SUMMARY_ZH }),
     );
 
-    expect(result).toEqual({ titleZh: '台積電公布第三季財報', summaryZh: SUMMARY_ZH });
+    expect(result).toEqual({
+      titleZh: '台積電公布第三季財報',
+      summaryZh: SUMMARY_ZH,
+      category: '財經',
+    });
   });
 
   it('strips surrounding whitespace from both fields', () => {
@@ -42,7 +53,11 @@ describe('parseDerivationOutput — accepted output', () => {
       reply({ title_zh: '  台積電公布第三季財報\n', summary_zh: `\t${SUMMARY_ZH}  ` }),
     );
 
-    expect(result).toEqual({ titleZh: '台積電公布第三季財報', summaryZh: SUMMARY_ZH });
+    expect(result).toEqual({
+      titleZh: '台積電公布第三季財報',
+      summaryZh: SUMMARY_ZH,
+      category: '財經',
+    });
   });
 
   it('accepts a fenced JSON block', () => {
@@ -51,6 +66,48 @@ describe('parseDerivationOutput — accepted output', () => {
     );
 
     expect(result.titleZh).toBe('標題');
+  });
+});
+
+describe('parseDerivationOutput — the category', () => {
+  it.each(DERIVATION_CATEGORIES)('accepts the fixed label %s', (category) => {
+    const result = parseDerivationOutput(
+      reply({ title_zh: '標題', summary_zh: SUMMARY_ZH, category }),
+    );
+
+    expect(result.category).toBe(category);
+  });
+
+  it('keeps the label the model chose, not a default', () => {
+    const result = parseDerivationOutput(
+      reply({ title_zh: '標題', summary_zh: SUMMARY_ZH, category: '體育' }),
+    );
+
+    expect(result.category).toBe('體育');
+  });
+
+  it('rejects a label outside the list', () => {
+    const error = parseFailure(
+      reply({ title_zh: '標題', summary_zh: SUMMARY_ZH, category: '運動' }),
+    );
+
+    expect(error).toBeInstanceOf(DerivationError);
+    expect(error).toMatchObject({ reason: 'invalid-output' });
+  });
+
+  it('rejects a missing category rather than storing an unclassified record', () => {
+    const error = parseFailure(JSON.stringify({ title_zh: '標題', summary_zh: SUMMARY_ZH }));
+
+    expect(error).toMatchObject({ reason: 'invalid-output' });
+  });
+
+  it('rejects a label in another language even when it means the same thing', () => {
+    // 'Technology' is the right idea and still not a value of this closed list.
+    const error = parseFailure(
+      reply({ title_zh: '標題', summary_zh: SUMMARY_ZH, category: 'Technology' }),
+    );
+
+    expect(error).toMatchObject({ reason: 'invalid-output' });
   });
 });
 

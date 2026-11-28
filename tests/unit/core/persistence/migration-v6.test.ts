@@ -70,7 +70,7 @@ describe('v6 article_derived migration', () => {
     expect(applied).toEqual([{ version: 6, name: 'article_derived' }]);
   });
 
-  it('creates the five MVP columns with the expected shape', () => {
+  it('creates the documented columns with the expected shape', () => {
     const handle = openMigratedDatabase();
 
     const columns = handle.query((connection) =>
@@ -83,6 +83,8 @@ describe('v6 article_derived migration', () => {
       { name: 'summary_zh', type: 'TEXT', notnull: 1, pk: 0 },
       { name: 'created_at', type: 'TEXT', notnull: 1, pk: 0 },
       { name: 'updated_at', type: 'TEXT', notnull: 1, pk: 0 },
+      // Added by v9. Nullable, because rows written before it have no category.
+      { name: 'category', type: 'TEXT', notnull: 0, pk: 0 },
     ]);
   });
 
@@ -100,6 +102,7 @@ describe('v6 article_derived migration', () => {
         article_id: 'a1',
         title_zh: 'AI 模型發布',
         summary_zh: '這是一段繁體中文摘要。',
+        category: null,
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
       },

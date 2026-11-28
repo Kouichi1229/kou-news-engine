@@ -20,7 +20,10 @@ const SEPARATOR = '\n\n';
  * caller read), and is never derived from the article id here: a link this module
  * invented would look valid and point nowhere.
  */
-export type TelegramArticleInput = ArticleDerivedDraft & {
+export type TelegramArticleInput = Pick<
+  ArticleDerivedDraft,
+  'articleId' | 'titleZh' | 'summaryZh' | 'at'
+> & {
   readonly sourceUrl: string | null;
 };
 
