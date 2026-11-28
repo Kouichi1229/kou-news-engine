@@ -26,7 +26,9 @@
     "extract": "node --env-file-if-exists=.env --import tsx src/cli/extract.ts",
     "extract:prod": "node dist/cli/extract.js",
     "recover": "node --env-file-if-exists=.env --import tsx src/cli/recover.ts",
-    "recover:prod": "node dist/cli/recover.js"
+    "recover:prod": "node dist/cli/recover.js",
+    "notify": "node --env-file-if-exists=.env --import tsx src/cli/notify.ts",
+    "notify:prod": "node dist/cli/notify.js"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
