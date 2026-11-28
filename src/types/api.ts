@@ -32,3 +32,13 @@ export interface DerivedArticleResponse {
   /** When this record was last written, ISO 8601. */
   updatedAt: string;
 }
+
+/**
+ * The derived-record list.
+ *
+ * A named field rather than a bare array so a later addition has somewhere to go
+ * without changing the type of the response body.
+ */
+export interface DerivedArticleListResponse {
+  articles: DerivedArticleResponse[];
+}

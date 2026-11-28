@@ -29,6 +29,15 @@ export interface ArticleDerivedRepository {
   findByArticleId(articleId: string): Promise<ArticleDerivedDraft | undefined>;
 
   /**
+   * The most recently updated records, newest first, at most `limit` of them.
+   *
+   * Ordered by `updated_at`, tie-broken by `article_id`, so two records written in
+   * the same millisecond still come back in a stable order. The limit is the
+   * caller's: this boundary does not decide how much is too much.
+   */
+  listRecent(limit: number): Promise<readonly ArticleDerivedDraft[]>;
+
+  /**
    * Stores the derived record, replacing an earlier one for the same article.
    *
    * Replacement rather than failure keeps `updated_at` meaningful while

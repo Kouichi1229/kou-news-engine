@@ -1,6 +1,10 @@
 import type { Request, RequestHandler, Response } from 'express';
 
-import type { ApiErrorBody, DerivedArticleResponse } from '../../types/api.js';
+import type {
+  ApiErrorBody,
+  DerivedArticleListResponse,
+  DerivedArticleResponse,
+} from '../../types/api.js';
 import type {
   ArticleDerivedDraft,
   ArticleDerivedRepository,
@@ -12,6 +16,39 @@ function toResponse(draft: ArticleDerivedDraft): DerivedArticleResponse {
     titleZh: draft.titleZh,
     summaryZh: draft.summaryZh,
     updatedAt: draft.at,
+  };
+}
+
+/**
+ * How many records the list endpoint returns at most.
+ *
+ * A fixed ceiling rather than a query parameter: this endpoint answers "what has
+ * been derived recently", and a caller asking for everything is how one request
+ * turns into an unbounded scan. Paging is a separate decision, not a knob added
+ * here.
+ */
+export const DERIVED_ARTICLE_LIST_LIMIT = 50;
+
+/**
+ * Serves the most recently updated derived records.
+ *
+ * An empty database is a 200 with an empty list, not a 404: the collection exists
+ * and is simply empty, which is a different answer from "this article has no
+ * record".
+ */
+export function createDerivedArticleListController(
+  repository: ArticleDerivedRepository,
+): RequestHandler {
+  return (_req: Request, res: Response, next): void => {
+    repository.listRecent(DERIVED_ARTICLE_LIST_LIMIT).then(
+      (drafts) => {
+        const body: DerivedArticleListResponse = { articles: drafts.map(toResponse) };
+        res.status(200).json(body);
+      },
+      (error: unknown) => {
+        next(error);
+      },
+    );
   };
 }
 

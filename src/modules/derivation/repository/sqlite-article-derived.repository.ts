@@ -47,6 +47,30 @@ export class SqliteArticleDerivedRepository implements ArticleDerivedRepository 
     };
   }
 
+  async listRecent(limit: number): Promise<readonly ArticleDerivedDraft[]> {
+    const rows = this.database.query((connection) =>
+      connection.all(
+        `SELECT article_id, title_zh, summary_zh, updated_at
+           FROM article_derived
+          ORDER BY updated_at DESC, article_id ASC
+          LIMIT ?`,
+        [limit],
+      ),
+    ) as Array<{
+      article_id: string;
+      title_zh: string;
+      summary_zh: string;
+      updated_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      articleId: row.article_id,
+      titleZh: row.title_zh,
+      summaryZh: row.summary_zh,
+      at: row.updated_at,
+    }));
+  }
+
   async save(draft: ArticleDerivedDraft): Promise<void> {
     this.database.query((connection) => {
       connection.all(
