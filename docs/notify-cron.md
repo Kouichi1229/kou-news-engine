@@ -69,6 +69,25 @@ Notes:
 A non-zero exit is the only signal cron needs; per-run details are in the JSON
 documents on stdout and stderr.
 
+## The summary line
+
+Every run ends with one summary document on stdout, whatever the outcome:
+
+```json
+{
+  "summary": { "sent": 1, "skipped": 0, "failed": 0 },
+  "results": [{ "articleId": "a1", "outcome": "sent" }]
+}
+```
+
+- `summary` counts the articles handled: `sent`, `skipped`, `failed`.
+- `results` lists each one with its `articleId` and, for a failure, its `reason`.
+
+The line is present even when the failure document went to stderr, so a wrapper
+can count runs with one `tail -1` and no knowledge of the outcome shapes. One
+invocation handles at most one article, so each count is `0` or `1`; the summary
+is a ledger entry, not a batch report.
+
 ### Failure documents worth alerting on
 
 | `status` | `reason`                                               | Meaning                                                                                                                                               |

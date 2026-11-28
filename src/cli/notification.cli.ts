@@ -60,6 +60,32 @@ export interface NotificationCliDependencies {
   writeStderr?: (line: string) => void;
 }
 
+/** One article's outcome, as the end-of-run summary counts it. */
+export interface NotificationRunResult {
+  /** Absent only when the run failed before an article could be chosen. */
+  readonly articleId: string | undefined;
+  readonly outcome: 'sent' | 'skipped' | 'failed';
+  /** Why it failed. Present exactly when `outcome` is `failed`. */
+  readonly reason?: string;
+}
+
+/** The document written as the last line of every run. */
+export interface NotificationRunSummary {
+  readonly summary: { readonly sent: number; readonly skipped: number; readonly failed: number };
+  readonly results: readonly NotificationRunResult[];
+}
+
+/** Counts the results. Exported so a test can assert the shape without a run. */
+export function summarizeNotificationRun(
+  results: readonly NotificationRunResult[],
+): NotificationRunSummary {
+  const counts = { sent: 0, skipped: 0, failed: 0 };
+  for (const result of results) {
+    counts[result.outcome] += 1;
+  }
+  return { summary: counts, results };
+}
+
 /**
  * Publishes the newest derived article, one message, one outcome.
  *
@@ -86,6 +112,19 @@ export interface NotificationCliDependencies {
  * nothing to publish is the steady state, not a failure. Every other outcome —
  * unreadable database, missing credential, Telegram refusal — exits `1` with the
  * reason in the document, so a supervisor never has to parse prose.
+ *
+ * ## The summary line
+ *
+ * The last line on stdout is always a summary of the run, whatever the outcome:
+ *
+ *   {"summary":{"sent":0,"skipped":1,"failed":0},"results":[{"articleId":"a1","outcome":"skipped"}]}
+ *
+ * It exists so a scheduler can count runs without parsing the outcome documents,
+ * which differ in shape per outcome. `results` carries the article id and, for a
+ * failure, the reason — the two facts an operator needs to find the article again.
+ * The summary is written to stdout even when the outcome document went to stderr,
+ * because the summary is a statistic, not a failure. Counts are 0 or 1 today: one
+ * invocation handles one article, and that is deliberately not changing.
  */
 export async function runNotificationCli(
   dependencies: NotificationCliDependencies = {},
@@ -97,7 +136,10 @@ export async function runNotificationCli(
     dependencies.writeStderr ?? ((line: string): void => void process.stderr.write(`${line}\n`));
   const open = dependencies.openDatabase ?? ((): SqliteDatabase => openDatabase());
 
+  const results: NotificationRunResult[] = [];
   let database: SqliteDatabase | undefined;
+  let articleId: string | undefined;
+
   try {
     database = open();
     const article = findLatestDerivedArticle(database);
@@ -108,6 +150,7 @@ export async function runNotificationCli(
       return EXIT_SUCCESS;
     }
 
+    articleId = article.articleId;
     const deliveries = new SqliteNotificationDeliveryRepository(database);
     const alreadySent = await deliveries.findSuccessful(article.articleId);
 
@@ -123,6 +166,7 @@ export async function runNotificationCli(
         articleId: article.articleId,
         messageId: alreadySent.messageId,
       });
+      results.push({ articleId: article.articleId, outcome: 'skipped' });
       return EXIT_SUCCESS;
     }
 
@@ -159,6 +203,11 @@ export async function runNotificationCli(
         messageId,
         error: message,
       });
+      results.push({
+        articleId: article.articleId,
+        outcome: 'failed',
+        reason: 'delivery-not-recorded',
+      });
       return EXIT_FAILURE;
     }
 
@@ -167,12 +216,14 @@ export async function runNotificationCli(
       articleId: article.articleId,
       messageId,
     });
+    results.push({ articleId: article.articleId, outcome: 'sent' });
     return EXIT_SUCCESS;
   } catch (error) {
     const reason = error instanceof TelegramSendError ? error.reason : 'unexpected-error';
     const message = error instanceof Error ? error.message : String(error);
     writeStderr(JSON.stringify({ status: 'failed', reason, error: message }));
     log.error('Notification run failed', { reason, error: message });
+    results.push({ articleId, outcome: 'failed', reason });
     return EXIT_FAILURE;
   } finally {
     if (database !== undefined) {
@@ -185,5 +236,6 @@ export async function runNotificationCli(
         });
       }
     }
+    writeStdout(JSON.stringify(summarizeNotificationRun(results)));
   }
 }

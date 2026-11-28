@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { EXIT_FAILURE, EXIT_SUCCESS } from '../../../src/cli/exit-codes.js';
-import { runNotificationCli } from '../../../src/cli/notification.cli.js';
+import { runNotificationCli, summarizeNotificationRun } from '../../../src/cli/notification.cli.js';
 import { openDatabase, type SqliteDatabase } from '../../../src/core/persistence/sqlite.js';
 import { formatTelegramMessage } from '../../../src/modules/notification/telegram.formatter.js';
 import {
@@ -108,6 +108,16 @@ function withDatabase<T>(path: string, read: (database: SqliteDatabase) => T): T
   } finally {
     database.close();
   }
+}
+
+/**
+ * The summary document, which every run writes as its last stdout line.
+ *
+ * Kept as one accessor so a test states "the smallest thing the summary must say"
+ * once, even after the outcome document above it changes shape.
+ */
+function summaryOf(run: CapturedRun): unknown {
+  return JSON.parse(run.stdout.at(-1) ?? '');
 }
 
 interface CapturedRun {
@@ -214,7 +224,11 @@ describe('notify CLI — failures exit non-zero with a reason', () => {
     const result = await run({ transport, database });
 
     expect(result.code).toBe(EXIT_FAILURE);
-    expect(result.stdout).toEqual([]);
+    expect(result.stdout).toHaveLength(1);
+    expect(summaryOf(result)).toEqual({
+      summary: { sent: 0, skipped: 0, failed: 1 },
+      results: [{ articleId: 'a1', outcome: 'failed', reason: 'api_rejected' }],
+    });
     expect(JSON.parse(result.stderr[0] ?? '')).toEqual({
       status: 'failed',
       reason: 'api_rejected',
@@ -315,6 +329,14 @@ describe('notify CLI — delivery deduplication', () => {
       messageId: 777,
     });
     expect(second.stderr).toEqual([]);
+    expect(summaryOf(first)).toEqual({
+      summary: { sent: 1, skipped: 0, failed: 0 },
+      results: [{ articleId: 'a1', outcome: 'sent' }],
+    });
+    expect(summaryOf(second)).toEqual({
+      summary: { sent: 0, skipped: 1, failed: 0 },
+      results: [{ articleId: 'a1', outcome: 'skipped' }],
+    });
     // One send in total: the second run decided before touching the transport.
     expect(calls).toHaveLength(1);
     expect(withDatabase(path, deliveries)).toHaveLength(1);
@@ -424,7 +446,10 @@ describe('notify CLI — a delivered message whose record could not be written',
 
     expect(result.code).toBe(EXIT_FAILURE);
     // The message really was delivered, so it must not be reported as a send failure.
-    expect(result.stdout).toEqual([]);
+    expect(summaryOf(result)).toEqual({
+      summary: { sent: 0, skipped: 0, failed: 1 },
+      results: [{ articleId: 'a1', outcome: 'failed', reason: 'delivery-not-recorded' }],
+    });
     expect(JSON.parse(result.stderr[0] ?? '')).toEqual({
       status: 'failed',
       reason: 'delivery-not-recorded',
@@ -483,7 +508,10 @@ describe('notify CLI — a send Telegram refused writes nothing', () => {
     });
 
     expect(result.code).toBe(EXIT_FAILURE);
-    expect(result.stdout).toEqual([]);
+    expect(summaryOf(result)).toEqual({
+      summary: { sent: 0, skipped: 0, failed: 1 },
+      results: [{ articleId: 'a1', outcome: 'failed', reason: 'api_rejected' }],
+    });
     // Distinguishable from `delivery-not-recorded`: this failure delivered nothing.
     expect(JSON.parse(result.stderr[0] ?? '')).toMatchObject({
       status: 'failed',
@@ -497,6 +525,108 @@ describe('notify CLI — a send Telegram refused writes nothing', () => {
     });
     expect(retry.code).toBe(EXIT_SUCCESS);
     expect(JSON.parse(retry.stdout[0] ?? '')).toMatchObject({ status: 'sent', messageId: 777 });
+  });
+});
+
+describe('notify CLI — the end-of-run summary', () => {
+  function seededPath(): string {
+    const path = temporaryDatabasePath();
+    withDatabase(path, (database) => {
+      seed(database, [{ id: 'a1', order: 1 }]);
+      derive(database, 'a1', '2026-02-01T00:00:00.000Z');
+    });
+    return path;
+  }
+
+  it('counts a first send as one sent and nothing else', async () => {
+    const path = seededPath();
+
+    const result = await run({
+      transport: fakeTransport().transport,
+      openDatabase: () => openDatabase({ path }),
+    });
+
+    expect(result.code).toBe(EXIT_SUCCESS);
+    expect(summaryOf(result)).toEqual({
+      summary: { sent: 1, skipped: 0, failed: 0 },
+      results: [{ articleId: 'a1', outcome: 'sent' }],
+    });
+  });
+
+  it('counts a repeat as one skipped and no send', async () => {
+    const path = seededPath();
+    const { transport } = fakeTransport();
+    await run({ transport, openDatabase: () => openDatabase({ path }) });
+
+    const second = await run({ transport, openDatabase: () => openDatabase({ path }) });
+
+    expect(second.code).toBe(EXIT_SUCCESS);
+    expect(summaryOf(second)).toEqual({
+      summary: { sent: 0, skipped: 1, failed: 0 },
+      results: [{ articleId: 'a1', outcome: 'skipped' }],
+    });
+  });
+
+  it('counts a failed send and keeps the reason and the article id', async () => {
+    const path = seededPath();
+    const { transport } = fakeTransport({ status: 503, body: '' });
+
+    const result = await run({ transport, openDatabase: () => openDatabase({ path }) });
+
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(summaryOf(result)).toEqual({
+      summary: { sent: 0, skipped: 0, failed: 1 },
+      results: [{ articleId: 'a1', outcome: 'failed', reason: 'http_status' }],
+    });
+  });
+
+  it('writes a zero summary when there was nothing to publish', async () => {
+    const path = temporaryDatabasePath();
+
+    const result = await run({
+      transport: fakeTransport().transport,
+      openDatabase: () => openDatabase({ path }),
+    });
+
+    expect(result.code).toBe(EXIT_SUCCESS);
+    expect(summaryOf(result)).toEqual({
+      summary: { sent: 0, skipped: 0, failed: 0 },
+      results: [],
+    });
+  });
+
+  it('writes a summary even when the database could not be opened', async () => {
+    const result = await run({
+      openDatabase: () => {
+        throw new Error('SQLITE_CANTOPEN');
+      },
+    });
+
+    expect(result.code).toBe(EXIT_FAILURE);
+    // No article was ever chosen, so the failure carries no article id.
+    expect(summaryOf(result)).toEqual({
+      summary: { sent: 0, skipped: 0, failed: 1 },
+      results: [{ outcome: 'failed', reason: 'unexpected-error' }],
+    });
+  });
+
+  it('counts mixed results in one document', () => {
+    expect(
+      summarizeNotificationRun([
+        { articleId: 'a1', outcome: 'sent' },
+        { articleId: 'a2', outcome: 'skipped' },
+        { articleId: 'a3', outcome: 'failed', reason: 'api_rejected' },
+        { articleId: 'a4', outcome: 'failed', reason: 'missing_content' },
+      ]),
+    ).toEqual({
+      summary: { sent: 1, skipped: 1, failed: 2 },
+      results: [
+        { articleId: 'a1', outcome: 'sent' },
+        { articleId: 'a2', outcome: 'skipped' },
+        { articleId: 'a3', outcome: 'failed', reason: 'api_rejected' },
+        { articleId: 'a4', outcome: 'failed', reason: 'missing_content' },
+      ],
+    });
   });
 });
 
@@ -524,7 +654,10 @@ describe('notify CLI — an article that fails validation', () => {
     // The provider refuses before any request, so nothing reaches Telegram and no
     // success row can exist for an article that was never published.
     expect(result.code).toBe(EXIT_FAILURE);
-    expect(result.stdout).toEqual([]);
+    expect(summaryOf(result)).toEqual({
+      summary: { sent: 0, skipped: 0, failed: 1 },
+      results: [{ articleId: 'a1', outcome: 'failed', reason: 'missing_content' }],
+    });
     expect(JSON.parse(result.stderr[0] ?? '')).toMatchObject({
       status: 'failed',
       reason: 'missing_content',

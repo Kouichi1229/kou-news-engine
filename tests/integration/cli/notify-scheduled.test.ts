@@ -170,7 +170,12 @@ describe('scheduled entry — failures reach the caller', () => {
     const result = await run(path, { transport });
 
     expect(result.code).toBe(EXIT_FAILURE);
-    expect(result.stdout).toEqual([]);
+    // The failure document goes to stderr; stdout still carries the run summary.
+    expect(result.stdout).toHaveLength(1);
+    expect(JSON.parse(result.stdout[0] ?? '')).toEqual({
+      summary: { sent: 0, skipped: 0, failed: 1 },
+      results: [{ articleId: 'a1', outcome: 'failed', reason: 'api_rejected' }],
+    });
     expect(JSON.parse(result.stderr[0] ?? '')).toMatchObject({
       status: 'failed',
       reason: 'api_rejected',
