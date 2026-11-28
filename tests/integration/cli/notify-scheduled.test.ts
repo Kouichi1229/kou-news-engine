@@ -448,6 +448,20 @@ describe('scheduled entry — the command line', () => {
     expect(existsSync(twice)).toBe(false);
   });
 
+  it('rejects an unknown flag with exit 2 and opens no database', () => {
+    const path = temporaryDatabasePath();
+
+    expect(spawn(['--frobnicate'], path)).toBe(EXIT_USAGE);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('rejects an unknown flag even when a valid --category is also given', () => {
+    const path = temporaryDatabasePath();
+
+    expect(spawn(['--category', '財經', '--frobnicate'], path)).toBe(EXIT_USAGE);
+    expect(existsSync(path)).toBe(false);
+  });
+
   it('rejects the --category=<value> spelling as an unknown argument', () => {
     const path = temporaryDatabasePath();
 

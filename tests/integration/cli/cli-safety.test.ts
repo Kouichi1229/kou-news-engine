@@ -385,6 +385,31 @@ describe('notify.ts — --category validation', () => {
     expect(existsSync(path)).toBe(false);
   });
 
+  it('rejects an unknown argument with the usage exit code, as the shared parser requires', () => {
+    const path = join(temporaryDirectory(), 'x.db');
+    const result = runCli('notify.ts', ['--frobnicate'], { DATABASE_PATH: path });
+
+    expect(result.status).toBe(EXIT_USAGE);
+    expect(result.stderr).toContain('Unknown argument: --frobnicate');
+    expect(result.stderr).toContain('Usage:');
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('still rejects an unknown argument that follows a valid --category', () => {
+    // `--category` is lifted out before `parseCliArgs` runs; the rest of the
+    // command line must still be checked rather than accepted because the
+    // category looked right.
+    const path = join(temporaryDirectory(), 'x.db');
+    const result = runCli('notify.ts', ['--execute', '--category', '財經', '--frobnicate'], {
+      DATABASE_PATH: path,
+    });
+
+    expect(result.status).toBe(EXIT_USAGE);
+    expect(result.stderr).toContain('Unknown argument: --frobnicate');
+    expect(result.stderr).not.toContain('Unknown category');
+    expect(existsSync(path)).toBe(false);
+  });
+
   it('accepts a known category and runs, finding nothing in an empty database', () => {
     const path = join(temporaryDirectory(), 'x.db');
     const result = runCli('notify.ts', ['--execute', '--category', '財經'], {
