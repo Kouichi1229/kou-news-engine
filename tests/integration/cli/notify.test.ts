@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { EXIT_FAILURE, EXIT_SUCCESS } from '../../../src/cli/exit-codes.js';
 import { runNotificationCli, summarizeNotificationRun } from '../../../src/cli/notification.cli.js';
 import { openDatabase, type SqliteDatabase } from '../../../src/core/persistence/sqlite.js';
+import type { DerivationCategory } from '../../../src/modules/derivation/derivation.service.js';
 import { formatTelegramMessage } from '../../../src/modules/notification/telegram.formatter.js';
 import {
   TELEGRAM_API_ORIGIN,
@@ -57,12 +58,18 @@ function seed(database: SqliteDatabase, articles: readonly { id: string; order: 
   });
 }
 
-function derive(database: SqliteDatabase, articleId: string, updatedAt: string): void {
+function derive(
+  database: SqliteDatabase,
+  articleId: string,
+  updatedAt: string,
+  category: string | null = '財經',
+): void {
   database.query((connection) => {
     connection.all(
-      `INSERT INTO article_derived (article_id, title_zh, summary_zh, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)`,
-      [articleId, `標題 ${articleId}`, `摘要 ${articleId}`, updatedAt, updatedAt],
+      `INSERT INTO article_derived
+         (article_id, title_zh, summary_zh, category, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [articleId, `標題 ${articleId}`, `摘要 ${articleId}`, category, updatedAt, updatedAt],
     );
   });
 }
@@ -133,6 +140,7 @@ async function run(
     chatId?: string | undefined;
     database?: SqliteDatabase;
     openDatabase?: () => SqliteDatabase;
+    category?: DerivationCategory;
   } = {},
 ): Promise<CapturedRun> {
   const open =
@@ -146,6 +154,7 @@ async function run(
     botToken: 'botToken' in options ? options.botToken : TOKEN,
     chatId: 'chatId' in options ? options.chatId : CHAT_ID,
     transport: options.transport ?? fakeTransport().transport,
+    ...(options.category === undefined ? {} : { category: options.category }),
     logger: { info: () => undefined, error: () => undefined },
     writeStdout: (line) => stdout.push(line),
     writeStderr: (line) => stderr.push(line),
@@ -679,5 +688,170 @@ describe('notify CLI — nothing to publish', () => {
     expect(JSON.parse(result.stdout[0] ?? '')).toEqual({ status: 'no-article' });
     expect(result.stderr).toEqual([]);
     expect(calls).toEqual([]);
+  });
+});
+
+describe('notify CLI — publishing one category', () => {
+  it('sends the newest article of the named category, not the newest overall', async () => {
+    const database = openDatabase({ path: ':memory:' });
+    seed(database, [
+      { id: 'a1', order: 1 },
+      { id: 'a2', order: 2 },
+      { id: 'a3', order: 3 },
+    ]);
+    derive(database, 'a1', '2026-02-01T00:00:00.000Z', '財經');
+    derive(database, 'a2', '2026-03-01T00:00:00.000Z', '科技');
+    // Newest overall, and the wrong category for this run.
+    derive(database, 'a3', '2026-04-01T00:00:00.000Z', '體育');
+    const { calls, transport } = fakeTransport();
+
+    const result = await run({ transport, database, category: '財經' });
+
+    expect(result.code).toBe(EXIT_SUCCESS);
+    expect(JSON.parse(result.stdout[0] ?? '')).toEqual({
+      status: 'sent',
+      articleId: 'a1',
+      messageId: 777,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.payload).toMatchObject({ chat_id: CHAT_ID });
+    expect(calls[0]?.payload).toEqual({
+      chat_id: CHAT_ID,
+      text: formatTelegramMessage({
+        articleId: 'a1',
+        titleZh: '標題 a1',
+        summaryZh: '摘要 a1',
+        at: '2026-02-01T00:00:00.000Z',
+        sourceUrl: 'https://example.com/a1',
+      }),
+    });
+  });
+
+  it('records the delivery of the category article, not of the newest one', async () => {
+    const path = temporaryDatabasePath();
+    withDatabase(path, (database) => {
+      seed(database, [
+        { id: 'a1', order: 1 },
+        { id: 'a2', order: 2 },
+      ]);
+      derive(database, 'a1', '2026-02-01T00:00:00.000Z', '健康');
+      derive(database, 'a2', '2026-03-01T00:00:00.000Z', '財經');
+    });
+    const { transport } = fakeTransport();
+
+    const result = await run({
+      transport,
+      openDatabase: () => openDatabase({ path }),
+      category: '健康',
+    });
+
+    expect(result.code).toBe(EXIT_SUCCESS);
+    expect(withDatabase(path, deliveries)).toEqual([
+      {
+        article_id: 'a1',
+        message_id: 777,
+        status: 'sent',
+        created_at: expect.any(String) as unknown as string,
+      },
+    ]);
+  });
+
+  it('still publishes the newest article of any category when none is named', async () => {
+    const database = openDatabase({ path: ':memory:' });
+    seed(database, [
+      { id: 'a1', order: 1 },
+      { id: 'a2', order: 2 },
+    ]);
+    derive(database, 'a1', '2026-02-01T00:00:00.000Z', '財經');
+    derive(database, 'a2', '2026-03-01T00:00:00.000Z', '體育');
+    const { calls, transport } = fakeTransport();
+
+    const result = await run({ transport, database });
+
+    expect(result.code).toBe(EXIT_SUCCESS);
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({ status: 'sent', articleId: 'a2' });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('skips an already-published article of that category instead of sending again', async () => {
+    const path = temporaryDatabasePath();
+    withDatabase(path, (database) => {
+      seed(database, [
+        { id: 'a1', order: 1 },
+        { id: 'a2', order: 2 },
+      ]);
+      derive(database, 'a1', '2026-02-01T00:00:00.000Z', '財經');
+      derive(database, 'a2', '2026-03-01T00:00:00.000Z', '財經');
+    });
+    const first = fakeTransport();
+    const firstRun = await run({
+      transport: first.transport,
+      openDatabase: () => openDatabase({ path }),
+      category: '財經',
+    });
+    expect(JSON.parse(firstRun.stdout[0] ?? '')).toMatchObject({ articleId: 'a2' });
+
+    const second = fakeTransport();
+    const secondRun = await run({
+      transport: second.transport,
+      openDatabase: () => openDatabase({ path }),
+      category: '財經',
+    });
+
+    expect(secondRun.code).toBe(EXIT_SUCCESS);
+    expect(JSON.parse(secondRun.stdout[0] ?? '')).toEqual({
+      status: 'skipped',
+      articleId: 'a2',
+      messageId: 777,
+    });
+    expect(second.calls).toEqual([]);
+    expect(summaryOf(secondRun)).toEqual({
+      summary: { sent: 0, skipped: 1, failed: 0 },
+      results: [{ articleId: 'a2', outcome: 'skipped' }],
+    });
+    expect(withDatabase(path, deliveries)).toHaveLength(1);
+  });
+
+  it('reports no-article when the category has no derived record', async () => {
+    const database = openDatabase({ path: ':memory:' });
+    seed(database, [{ id: 'a1', order: 1 }]);
+    derive(database, 'a1', '2026-02-01T00:00:00.000Z', '財經');
+    const { calls, transport } = fakeTransport();
+
+    const result = await run({ transport, database, category: '娛樂' });
+
+    expect(result.code).toBe(EXIT_SUCCESS);
+    expect(JSON.parse(result.stdout[0] ?? '')).toEqual({ status: 'no-article' });
+    expect(summaryOf(result)).toEqual({
+      summary: { sent: 0, skipped: 0, failed: 0 },
+      results: [],
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it('never selects a record whose category is null when a category is named', async () => {
+    const database = openDatabase({ path: ':memory:' });
+    seed(database, [{ id: 'a1', order: 1 }]);
+    derive(database, 'a1', '2026-02-01T00:00:00.000Z', null);
+    const { calls, transport } = fakeTransport();
+
+    const result = await run({ transport, database, category: '財經' });
+
+    expect(result.code).toBe(EXIT_SUCCESS);
+    expect(JSON.parse(result.stdout[0] ?? '')).toEqual({ status: 'no-article' });
+    expect(calls).toEqual([]);
+  });
+
+  it('still publishes that unclassified record when no category is named', async () => {
+    const database = openDatabase({ path: ':memory:' });
+    seed(database, [{ id: 'a1', order: 1 }]);
+    derive(database, 'a1', '2026-02-01T00:00:00.000Z', null);
+    const { calls, transport } = fakeTransport();
+
+    const result = await run({ transport, database });
+
+    expect(result.code).toBe(EXIT_SUCCESS);
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({ status: 'sent', articleId: 'a1' });
+    expect(calls).toHaveLength(1);
   });
 });

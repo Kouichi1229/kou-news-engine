@@ -1,5 +1,7 @@
 import { logger as defaultLogger } from '../core/logger.js';
 import { openDatabase, type SqliteDatabase } from '../core/persistence/sqlite.js';
+import type { DerivationCategory } from '../modules/derivation/derivation.service.js';
+import { SqliteArticleDerivedRepository } from '../modules/derivation/repository/sqlite-article-derived.repository.js';
 import type { TelegramArticleInput } from '../modules/notification/telegram.formatter.js';
 import { SqliteNotificationDeliveryRepository } from '../modules/notification/repository/sqlite-notification-delivery.repository.js';
 import {
@@ -11,41 +13,73 @@ import {
 import { EXIT_FAILURE, EXIT_SUCCESS } from './exit-codes.js';
 
 /**
- * The one row this CLI publishes: the most recently updated derived article that
- * still has its source row.
+ * How many of the newest records are considered before giving up.
  *
- * The link comes from `articles.url` — the stored original — because
- * `article_derived` holds no URL and nothing here may synthesize one. The inner
- * join also excludes a derivation whose article row was already purged by
- * retention: publishing it would need a link that no longer exists.
+ * The chosen record also has to still have its `articles` row, because the message
+ * links to the stored original. Retention removes both together, so the first
+ * candidate is normally the answer and the ceiling only bounds the search if that
+ * ever stops being true.
  */
-const LATEST_DERIVED_SQL = `SELECT d.article_id, d.title_zh, d.summary_zh, d.updated_at, a.url
-   FROM article_derived AS d
-   JOIN articles AS a ON a.id = d.article_id
-  ORDER BY d.updated_at DESC, d.article_id ASC
-  LIMIT 1`;
+const NOTIFICATION_CANDIDATE_LIMIT = 50;
 
-function findLatestDerivedArticle(database: SqliteDatabase): TelegramArticleInput | undefined {
-  const row = database.query((connection) => connection.get(LATEST_DERIVED_SQL)) as
-    | { article_id: string; title_zh: string; summary_zh: string; updated_at: string; url: string }
-    | undefined;
+/** The stored original link, or `undefined` when the article row is gone. */
+function findArticleUrl(database: SqliteDatabase, articleId: string): string | undefined {
+  const row = database.query((connection) =>
+    connection.get('SELECT url FROM articles WHERE id = ?', [articleId]),
+  ) as { url: string } | undefined;
+  return row?.url;
+}
 
-  if (row === undefined) {
-    return undefined;
+/**
+ * The one row this CLI publishes: the most recently updated derived article that
+ * still has its source row, optionally of one category.
+ *
+ * The category filter is the repository's own predicate — the same `category = ?`
+ * that serves `GET /api/articles/derived?category=` — rather than a second copy of
+ * the SQL kept in step here. The link comes from `articles.url`, the stored
+ * original, because `article_derived` holds no URL and nothing here may synthesize
+ * one; a derivation whose article row was purged is skipped, since publishing it
+ * would need a link that no longer exists.
+ *
+ * A record derived before categories existed has a null category, so a filtered run
+ * never selects it. An unfiltered run still can, which is the behaviour it had
+ * before the filter existed.
+ */
+async function findLatestDerivedArticle(
+  database: SqliteDatabase,
+  category: DerivationCategory | undefined,
+): Promise<TelegramArticleInput | undefined> {
+  const drafts = await new SqliteArticleDerivedRepository(database).listRecent(
+    NOTIFICATION_CANDIDATE_LIMIT,
+    category,
+  );
+
+  for (const draft of drafts) {
+    const sourceUrl = findArticleUrl(database, draft.articleId);
+    if (sourceUrl !== undefined) {
+      return {
+        articleId: draft.articleId,
+        titleZh: draft.titleZh,
+        summaryZh: draft.summaryZh,
+        at: draft.at,
+        sourceUrl,
+      };
+    }
   }
 
-  return {
-    articleId: row.article_id,
-    titleZh: row.title_zh,
-    summaryZh: row.summary_zh,
-    at: row.updated_at,
-    sourceUrl: row.url,
-  };
+  return undefined;
 }
 
 export interface NotificationCliDependencies {
   /** Defaults to the production `openDatabase()` reading `env.DATABASE_PATH`. */
   openDatabase?: () => SqliteDatabase;
+  /**
+   * Publishes only the newest article of this category.
+   *
+   * Absent means no filter: the newest derived article of any category, as before.
+   * The entry point validates the value, so an unknown label never reaches a run.
+   */
+  category?: DerivationCategory;
   /** Defaults to `env.TELEGRAM_BOT_TOKEN`, supplied by the entry point. */
   botToken?: string | undefined;
   /** Defaults to `env.TELEGRAM_CHAT_ID`, supplied by the entry point. */
@@ -142,7 +176,7 @@ export async function runNotificationCli(
 
   try {
     database = open();
-    const article = findLatestDerivedArticle(database);
+    const article = await findLatestDerivedArticle(database, dependencies.category);
 
     if (article === undefined) {
       writeStdout(JSON.stringify({ status: 'no-article' }));

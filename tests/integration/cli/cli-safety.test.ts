@@ -331,3 +331,72 @@ describe('network guard positive control — shared by T-11a..T-11d', () => {
     }
   });
 });
+
+/**
+ * `notify --category` is validated before configuration and before the database.
+ *
+ * The closed list lives in the derivation module, so a bad label must be rejected
+ * there rather than by `parseCliArgs` — and, like every other rejected argument,
+ * without reaching `env.ts` or creating a database file.
+ */
+describe('notify.ts — --category validation', () => {
+  it('rejects an unknown category with the usage exit code and the closed list', () => {
+    const path = join(temporaryDirectory(), 'x.db');
+    const result = runCli('notify.ts', ['--execute', '--category', '運動'], {
+      DATABASE_PATH: path,
+    });
+
+    expect(result.status).toBe(EXIT_USAGE);
+    expect(result.stderr).toContain('Unknown category "運動"');
+    // The full vocabulary, so the operator can fix the command from the message.
+    expect(result.stderr).toContain('體育');
+    expect(result.stderr).toContain('Usage:');
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('rejects an empty category value', () => {
+    const path = join(temporaryDirectory(), 'x.db');
+    const result = runCli('notify.ts', ['--execute', '--category', ''], {
+      DATABASE_PATH: path,
+    });
+
+    expect(result.status).toBe(EXIT_USAGE);
+    expect(result.stderr).toContain('Unknown category');
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('rejects --category with no value', () => {
+    const path = join(temporaryDirectory(), 'x.db');
+    const result = runCli('notify.ts', ['--execute', '--category'], { DATABASE_PATH: path });
+
+    expect(result.status).toBe(EXIT_USAGE);
+    expect(result.stderr).toContain('needs a value');
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('rejects --category given twice instead of guessing which one was meant', () => {
+    const path = join(temporaryDirectory(), 'x.db');
+    const result = runCli('notify.ts', ['--execute', '--category', '財經', '--category', '科技'], {
+      DATABASE_PATH: path,
+    });
+
+    expect(result.status).toBe(EXIT_USAGE);
+    expect(result.stderr).toContain('only once');
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('accepts a known category and runs, finding nothing in an empty database', () => {
+    const path = join(temporaryDirectory(), 'x.db');
+    const result = runCli('notify.ts', ['--execute', '--category', '財經'], {
+      DATABASE_PATH: path,
+    });
+
+    // Past argument parsing and past the category check: the run opens the database
+    // and reports the steady state. Nothing is sent, because there is nothing to send.
+    expect(result.stderr).not.toContain('Unknown argument');
+    expect(result.stderr).not.toContain('Unknown category');
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('"status":"no-article"');
+    expect(existsSync(path)).toBe(true);
+  });
+});

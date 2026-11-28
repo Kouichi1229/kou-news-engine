@@ -30,28 +30,40 @@ export interface UsageOptions {
    * for the commands that do have a preview.
    */
   executeRequired?: boolean;
+  /**
+   * Extra tokens on the usage line, e.g. `[--category <category>]`.
+   *
+   * Absent by default, which keeps the existing commands' output byte-for-byte
+   * identical.
+   */
+  usageSuffix?: string;
+  /** Flag documentation appended to the options block. Absent by default. */
+  extraFlags?: string;
 }
 
 export function usageFor(command: string, description: string, options: UsageOptions = {}): string {
+  const suffix = options.usageSuffix === undefined ? '' : ` ${options.usageSuffix}`;
+  const extra = options.extraFlags === undefined ? '' : `\n${options.extraFlags}`;
+
   if (options.executeRequired === true) {
-    return `Usage: ${command} [--help | --execute]
+    return `Usage: ${command} [--help | --execute]${suffix}
 
 ${description}
 
 Options:
-${EXECUTE_ONLY_FLAGS}
+${EXECUTE_ONLY_FLAGS}${extra}
 
 There is no preview mode and no default mode. An external scheduler must pass
 --execute explicitly; every other invocation exits 2 without opening a database.
 `;
   }
 
-  return `Usage: ${command} [--help | --dry-run | --execute]
+  return `Usage: ${command} [--help | --dry-run | --execute]${suffix}
 
 ${description}
 
 Options:
-${COMMON_FLAGS}
+${COMMON_FLAGS}${extra}
 
 With no arguments the command runs a dry-run preview, never real work. A
 scheduler must pass --execute explicitly.

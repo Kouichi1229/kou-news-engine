@@ -25,6 +25,27 @@ something else. `--help` prints the usage and exits `0`.
 `notification_delivery` deduplication, same exit codes. The only difference is
 that the flags are settled for you.
 
+## Publishing one category
+
+```bash
+npm run notify -- --execute --category 財經
+```
+
+`--category` narrows the selection to one of the nine fixed categories (國際,
+政治, 財經, 科技, 社會, 生活, 健康, 娛樂, 體育). Everything else is unchanged: the
+newest article of that category is published, one message per run, and an article
+already recorded in `notification_delivery` is skipped rather than sent again.
+
+Without the flag the run publishes the newest derived article of any category,
+exactly as before. A record derived before categories existed has no category, so
+a filtered run never picks it up; an unfiltered run still can.
+
+An unknown label — including a misspelling, a value with stray whitespace, or the
+flag given twice — exits `2` with the full list in the message and opens no
+database, so a bad cron line fails loudly. `notify:scheduled` does **not** pass
+`--category`; use `npm run notify -- --execute --category <category>` when a
+schedule needs a single category.
+
 ## Environment
 
 Everything the run needs comes from the environment. Nothing is hard-coded, so
