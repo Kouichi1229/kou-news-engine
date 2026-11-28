@@ -618,3 +618,150 @@ describe('createDerivationHook — the wiring the extraction CLI uses', () => {
     expect(derivedRows()).toEqual([]);
   });
 });
+
+describe('regenerate — the explicit replacement entry', () => {
+  const FIRST = '2026-02-01T00:00:00.000Z';
+  const SECOND = '2026-03-01T00:00:00.000Z';
+
+  function service(provider: FakeProvider, at: string): ArticleDerivationService {
+    return new ArticleDerivationService({
+      provider,
+      repository: derived,
+      now: () => Date.parse(at),
+    });
+  }
+
+  it('leaves the ordinary path alone: an existing record still skips the model', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [
+        { kind: 'success', text: modelReply(110, '第一版標題') },
+        { kind: 'success', text: modelReply(110, '第二版標題') },
+      ],
+    });
+    await service(provider, FIRST).derive('a1', BODY);
+
+    const second = await service(provider, SECOND).derive('a1', BODY);
+
+    expect(provider.receivedRequests).toHaveLength(1);
+    expect(second.titleZh).toBe('第一版標題');
+    expect(second.at).toBe(FIRST);
+    expect(derivedRows()).toHaveLength(1);
+  });
+
+  it('replaces the title, the summary and updated_at, keeping created_at', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [
+        { kind: 'success', text: modelReply(110, '第一版標題') },
+        { kind: 'success', text: modelReply(140, '第二版標題') },
+      ],
+    });
+    await service(provider, FIRST).derive('a1', BODY);
+
+    const regenerated = await service(provider, SECOND).regenerate('a1', BODY);
+
+    expect(provider.receivedRequests).toHaveLength(2);
+    expect(regenerated).toEqual({
+      articleId: 'a1',
+      titleZh: '第二版標題',
+      summaryZh: summaryOf(140),
+      at: SECOND,
+    });
+    expect(derivedRows()).toEqual([
+      {
+        article_id: 'a1',
+        title_zh: '第二版標題',
+        summary_zh: summaryOf(140),
+        created_at: FIRST,
+        updated_at: SECOND,
+      },
+    ]);
+  });
+
+  it('keeps the stored record when the provider call fails', async () => {
+    insertArticle('a1');
+    const stored = {
+      articleId: 'a1',
+      titleZh: '第一版標題',
+      summaryZh: summaryOf(110),
+      at: FIRST,
+    };
+    await derived.save(stored);
+    const provider = new FakeProvider({ responses: [{ kind: 'error', error: 'unavailable' }] });
+
+    await expect(service(provider, SECOND).regenerate('a1', BODY)).rejects.toBeDefined();
+
+    expect(derivedRows()).toEqual([
+      {
+        article_id: 'a1',
+        title_zh: '第一版標題',
+        summary_zh: summaryOf(110),
+        created_at: FIRST,
+        updated_at: FIRST,
+      },
+    ]);
+  });
+
+  it('keeps the stored record when the answer is rejected', async () => {
+    insertArticle('a1');
+    await derived.save({
+      articleId: 'a1',
+      titleZh: '第一版標題',
+      summaryZh: summaryOf(110),
+      at: FIRST,
+    });
+    const provider = new FakeProvider({
+      responses: [{ kind: 'success', text: modelReply(DERIVATION_LIMITS.maxSummaryChars + 1) }],
+    });
+
+    await expect(service(provider, SECOND).regenerate('a1', BODY)).rejects.toMatchObject({
+      reason: 'summary-length',
+    });
+
+    expect(derivedRows()).toEqual([
+      {
+        article_id: 'a1',
+        title_zh: '第一版標題',
+        summary_zh: summaryOf(110),
+        created_at: FIRST,
+        updated_at: FIRST,
+      },
+    ]);
+  });
+
+  it('does not disturb an existing delivery record', async () => {
+    insertArticle('a1');
+    await derived.save({
+      articleId: 'a1',
+      titleZh: '第一版標題',
+      summaryZh: summaryOf(110),
+      at: FIRST,
+    });
+    database.query((connection) => {
+      connection.all(
+        `INSERT INTO notification_delivery (article_id, message_id, status, created_at)
+         VALUES ('a1', 777, 'sent', '2026-02-02T00:00:00.000Z')`,
+      );
+    });
+    const provider = new FakeProvider({
+      responses: [{ kind: 'success', text: modelReply(110, '第二版標題') }],
+    });
+
+    await service(provider, SECOND).regenerate('a1', BODY);
+
+    // Regenerating rewrites the text and bumps updated_at. The ledger is untouched,
+    // so the notify CLI still sees the article as already published and skips it.
+    const deliveries = database.query((connection) =>
+      connection.all('SELECT * FROM notification_delivery'),
+    ) as Array<Record<string, unknown>>;
+    expect(deliveries).toEqual([
+      {
+        article_id: 'a1',
+        message_id: 777,
+        status: 'sent',
+        created_at: '2026-02-02T00:00:00.000Z',
+      },
+    ]);
+  });
+});

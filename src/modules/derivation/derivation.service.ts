@@ -148,6 +148,19 @@ export interface ArticleDerivationDeps {
  * call answers from the table and leaves the model alone. That is what makes a
  * retried job cheap when the first attempt succeeded everywhere except in this
  * process's bookkeeping.
+ *
+ * ## Skipping is the default; replacing is explicit
+ *
+ * `derive` keeps that no-op, because it is what the extraction hook calls on every
+ * attempt and it must stay cheap and repeatable. `regenerate` is the separate,
+ * deliberately-named entry for the other intent: produce a fresh record even
+ * though one exists, and replace it.
+ *
+ * Both share the same write path, so the two guarantees hold for both: the record
+ * is written only after the model's answer has been parsed and accepted, and an
+ * update keeps `created_at`. A failed regeneration therefore leaves the previous
+ * title, summary and `updated_at` exactly as they were — nothing is deleted first
+ * and rewritten later.
  */
 export class ArticleDerivationService {
   private readonly deps: ArticleDerivationDeps;
@@ -165,6 +178,25 @@ export class ArticleDerivationService {
       return existing;
     }
 
+    return this.produceAndStore(articleId, text);
+  }
+
+  /**
+   * Produces a fresh record for an article even when one is already stored.
+   *
+   * The existing-record check is deliberately absent: asking to regenerate a
+   * record that does not exist is the same work as deriving it, and asking to
+   * regenerate one that does is exactly what the caller wants. Everything else is
+   * shared with `derive` — one provider call, the same output contract, one upsert
+   * — so a rejected or failed answer never reaches storage and the row it would
+   * have replaced is still there.
+   */
+  async regenerate(articleId: string, text: string): Promise<ArticleDerivedDraft> {
+    return this.produceAndStore(articleId, text);
+  }
+
+  /** One model call and one write. Nothing is stored unless the answer is accepted. */
+  private async produceAndStore(articleId: string, text: string): Promise<ArticleDerivedDraft> {
     const title = await this.deps.repository.findArticleTitle(articleId);
     if (title === undefined) {
       throw new DerivationError('article-missing', `No article row for ${articleId}`);
