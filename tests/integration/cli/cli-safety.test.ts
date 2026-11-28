@@ -142,6 +142,40 @@ describe.each([['extract.ts'], ['ingest.ts']] as const)('%s — rejected argumen
   });
 });
 
+describe('extract.ts — the --limit cap', () => {
+  it.each([['0'], ['101'], ['two'], ['2.5']])(
+    'rejects --limit %s with the usage exit code and opens no database',
+    (value) => {
+      const path = join(temporaryDirectory(), 'x.db');
+      const result = runCli('extract.ts', ['--execute', '--limit', value], { DATABASE_PATH: path });
+
+      expect(result.status).toBe(EXIT_USAGE);
+      expect(result.stderr).toContain('--limit');
+      expect(result.stderr).toContain('Usage:');
+      expect(existsSync(path)).toBe(false);
+    },
+  );
+
+  it('rejects a bare --limit with the usage exit code', () => {
+    const path = join(temporaryDirectory(), 'x.db');
+    const result = runCli('extract.ts', ['--limit'], { DATABASE_PATH: path });
+
+    expect(result.status).toBe(EXIT_USAGE);
+    expect(result.stderr).toContain('needs a value');
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('documents the flag in the usage text', () => {
+    const result = runCli('extract.ts', ['--help'], {
+      DATABASE_PATH: join(temporaryDirectory(), 'x.db'),
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('--limit <n>');
+    expect(result.stdout).toContain('default 5');
+  });
+});
+
 /**
  * T-11a and T-11b — `--help` isolation.
  *

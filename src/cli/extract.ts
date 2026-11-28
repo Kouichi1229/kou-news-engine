@@ -18,12 +18,26 @@
  */
 import { parseCliArgs } from './args.js';
 import { EXIT_USAGE } from './extraction-exit-codes.js';
+import { parseLimitArgument } from './limit-argument.js';
 import { usageFor } from './usage.js';
 
-const USAGE = usageFor('extract', 'Extract one batch of article bodies.');
+const USAGE = usageFor('extract', 'Extract one batch of article bodies.', {
+  usageSuffix: '[--limit <n>]',
+  extraFlags: `  --limit <n>  Stop after this many articles (1-100, default 5). Each
+               article costs one LLM call, so the cap keeps a run inside the
+               quota of a free-tier key.`,
+});
 
 async function main(): Promise<void> {
-  const parsed = parseCliArgs(process.argv.slice(2));
+  const taken = parseLimitArgument(process.argv.slice(2));
+
+  if (taken.kind === 'error') {
+    process.stderr.write(`${taken.message}\n\n${USAGE}`);
+    process.exitCode = EXIT_USAGE;
+    return;
+  }
+
+  const parsed = parseCliArgs(taken.argument.rest);
 
   if (parsed.mode === 'usage-error') {
     process.stderr.write(`${parsed.message}\n\n${USAGE}`);
@@ -46,7 +60,10 @@ async function main(): Promise<void> {
   const { runExtractionCli } = await import('./extraction.cli.js');
 
   setLogLevel(env.LOG_LEVEL);
-  process.exitCode = await runExtractionCli({ execute: parsed.mode === 'execute' });
+  process.exitCode = await runExtractionCli({
+    execute: parsed.mode === 'execute',
+    ...(taken.argument.limit === undefined ? {} : { limit: taken.argument.limit }),
+  });
 }
 
 main().catch((error: unknown): void => {

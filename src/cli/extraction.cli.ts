@@ -1,3 +1,4 @@
+import { DEFAULT_EXTRACT_LIMIT } from '../config/constants.js';
 import { createCancellationSignal } from '../core/lifecycle/cancellation.js';
 import { createSignalCoordinator } from '../core/lifecycle/signal-coordinator.js';
 import type { SignalHost } from '../core/lifecycle/signal-coordinator.js';
@@ -78,6 +79,13 @@ export interface ExtractionCliDependencies {
    * extraction by accident.
    */
   execute?: boolean;
+  /**
+   * Articles to process this run. Defaults to `DEFAULT_EXTRACT_LIMIT`.
+   *
+   * The cap exists because each article costs one real LLM call; the entry point
+   * overrides it per invocation with `--limit <n>`.
+   */
+  limit?: number;
 }
 
 /**
@@ -291,10 +299,19 @@ async function runExtraction(dependencies: ExtractionCliDependencies): Promise<n
 
     const repository = new SqliteArticleContentRepository(database);
     const { createDerivationHook } = await import('../modules/derivation/derivation.bootstrap.js');
+
+    // Set by the hook when the provider answers 429. The loop reads it before the
+    // next claim, so a rate limit ends the run instead of being paid for once per
+    // remaining article.
+    let rateLimited = false;
+
     const derivationOption = await createDerivationHook({
       database,
       now: (): number => clock.now(),
       log,
+      onRateLimit: (): void => {
+        rateLimited = true;
+      },
       ...(dependencies.provider === undefined ? {} : { provider: dependencies.provider }),
     });
 
@@ -303,10 +320,24 @@ async function runExtraction(dependencies: ExtractionCliDependencies): Promise<n
       urls: new SqliteArticleUrlLookup(database),
       clock,
       isCancelled: (): boolean => cancellation.isCancelled(),
+      isRateLimited: (): boolean => rateLimited,
+      maxArticles: dependencies.limit ?? DEFAULT_EXTRACT_LIMIT,
       ...derivationOption,
     });
 
     const summary = await service.run();
+
+    if (summary.rateLimited === true) {
+      log.warn(
+        'Stopping extraction: the LLM provider reported a rate limit (HTTP 429). ' +
+          'Remaining articles will be picked up by a later run.',
+        { claimed: summary.claimed, extracted: summary.extracted, failed: summary.failed },
+      );
+      // A quota condition is not a failure of this run: what was processed was
+      // recorded, and the rest stays queued for the next invocation.
+      return EXIT_SUCCESS;
+    }
+
     const outcome = classifyExtractionRun(summary, observedSignal);
 
     log.info('Extraction run finished', {

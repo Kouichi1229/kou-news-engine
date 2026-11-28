@@ -1,8 +1,46 @@
-# Scheduling the Telegram notification run
+# Scheduling the notification run
 
-The engine does not run its own scheduler. A system scheduler — cron, a systemd
-timer, a container orchestrator's job — calls one command on the schedule it
-wants, and that process publishes at most one article and exits.
+## The daily pipeline (`npm start`)
+
+The server registers one in-process schedule when it starts listening. By default
+it fires at **08:00 every day in `APP_TIMEZONE` (Asia/Taipei)**, and runs three
+steps in order:
+
+| Step    | Command equivalent             | Cap         |
+| ------- | ------------------------------ | ----------- |
+| ingest  | `npm run ingest -- --execute`  | one pass    |
+| extract | `npm run extract -- --execute` | 5 articles  |
+| notify  | `npm run notify -- --execute`  | one article |
+
+`SCHEDULE_CRON` overrides the time, for example `SCHEDULE_CRON='*/2 * * * *'` for
+a two-minute local test. The expression is validated with `node-cron` at startup:
+a typo stops the process with `Invalid SCHEDULE_CRON expression ...` instead of
+silently never firing. Overlapping runs are suppressed (`noOverlap`), and
+`SIGTERM`/`SIGINT` stops future fires before the server drains.
+
+Every step's exit code is logged; a failing step does not cancel the rest, so a
+broken feed cannot block the articles already stored from being published.
+
+## Quota protection
+
+Three limits keep a free-tier Gemini key from being exhausted:
+
+- **Run cap.** `extract --execute` processes at most **5** articles per run. Pass
+  `--limit <n>` (1–100) to change it for one invocation; a value outside that
+  range, a missing value, or the flag twice exits `2` without opening the
+  database.
+- **Cooldown.** Calls to the real provider are spaced a fixed **4 seconds** apart
+  within a run. The `fake` provider builds no hook, so nothing is paced.
+- **429 stop.** When the provider answers `429`, the run stops before the next
+  article is claimed, logs `Stopping extraction: the LLM provider reported a rate
+limit (HTTP 429)`, and exits `0`. The alert-free articles stay queued for the
+  next run.
+
+## External scheduling
+
+The engine also runs fine without the in-process schedule. A system scheduler —
+cron, a systemd timer, a container orchestrator's job — can call one command on
+the schedule it wants, and that process publishes at most one article and exits.
 
 ## The command
 
@@ -141,5 +179,6 @@ DATABASE_PATH=/tmp/scratch.db TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... \
   npm run notify:scheduled
 ```
 
-The same command is what the scheduler runs; there is no separate dry-run and no
-in-process loop.
+The same command is what an external scheduler runs; the in-process schedule calls
+the same entry function, so there is no separate dry-run and no second
+implementation.

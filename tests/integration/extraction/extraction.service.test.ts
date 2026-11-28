@@ -426,3 +426,75 @@ describe('ExtractionService — concurrency guard', () => {
     await expect(service({ concurrency: 2 }).run()).rejects.toThrow(/CONCURRENCY = 1/);
   });
 });
+
+describe('ExtractionService — run size cap', () => {
+  it('stops after maxArticles and leaves the rest claimable', async () => {
+    for (const [index, id] of ['a1', 'a2', 'a3', 'a4'].entries()) {
+      insertArticle(id, index + 1);
+    }
+    let fetches = 0;
+
+    const summary = await service({
+      maxArticles: 2,
+      fetchPage: async () => {
+        fetches += 1;
+        return { html: html(LONG_BODY), finalUrl: 'https://example.com/x', status: 200 };
+      },
+    }).run();
+
+    expect(summary.claimed).toBe(2);
+    expect(summary.extracted).toBe(2);
+    expect(fetches).toBe(2);
+    expect(summary.rateLimited).toBeUndefined();
+
+    // The remainder is still queued for the next invocation.
+    const claimable = await repository.countClaimable({
+      now: 1_000,
+      extractorVersion: 'v1',
+    });
+    expect(claimable).toBeGreaterThan(0);
+  });
+
+  it('processes the whole queue when no cap is given', async () => {
+    for (const [index, id] of ['a1', 'a2', 'a3'].entries()) {
+      insertArticle(id, index + 1);
+    }
+
+    const summary = await service({
+      fetchPage: async () => ({
+        html: html(LONG_BODY),
+        finalUrl: 'https://example.com/x',
+        status: 200,
+      }),
+    }).run();
+
+    expect(summary.claimed).toBe(3);
+  });
+});
+
+describe('ExtractionService — rate limit stop', () => {
+  it('reports rateLimited and stops claiming when the flag is set by the hook', async () => {
+    for (const [index, id] of ['a1', 'a2', 'a3'].entries()) {
+      insertArticle(id, index + 1);
+    }
+    let rateLimited = false;
+
+    const summary = await service({
+      isRateLimited: (): boolean => rateLimited,
+      fetchPage: async () => ({
+        html: html(LONG_BODY),
+        finalUrl: 'https://example.com/x',
+        status: 200,
+      }),
+      deriveArticle: async (): Promise<void> => {
+        rateLimited = true;
+        throw new Error('rate limited');
+      },
+    }).run();
+
+    expect(summary.claimed).toBe(1);
+    expect(summary.failed).toBe(1);
+    expect(summary.rateLimited).toBe(true);
+    expect(summary.cancelled).toBe(false);
+  });
+});

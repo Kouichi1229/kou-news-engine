@@ -83,4 +83,6 @@ export interface ExtractionRunSummary {
   lostClaims: number;
   /** True when a signal stopped the run before the queue was empty. */
   cancelled: boolean;
+  /** True when a provider rate limit stopped the loop before the queue was empty. */
+  rateLimited?: true;
 }

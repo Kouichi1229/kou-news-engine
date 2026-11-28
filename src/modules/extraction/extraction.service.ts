@@ -63,6 +63,23 @@ export interface ExtractionServiceOptions {
    * cause itself; only the failure is recorded here.
    */
   deriveArticle?: (articleId: string, text: string) => Promise<void>;
+  /**
+   * Stops the loop once this many articles have been claimed in the run.
+   *
+   * A run is capped rather than exhaustive because each article costs one real
+   * LLM call, and an uncapped run over a large backlog exhausts a free-tier
+   * quota in a single invocation. Absent means no cap.
+   */
+  maxArticles?: number;
+  /**
+   * True once a provider rate limit has been hit.
+   *
+   * Checked at the top of every iteration: the article that hit the limit has
+   * already been recorded, and the loop must not spend the remaining quota on
+   * further attempts. Unlike `isCancelled`, this is not a signal: the run ends
+   * with its work recorded and nothing refunded.
+   */
+  isRateLimited?: () => boolean;
   concurrency?: number;
   timeoutMs?: number;
 }
@@ -142,7 +159,18 @@ export class ExtractionService {
     // accumulate across cron-invoked runs.
     const attempted = new Set<string>();
 
+    const maxArticles = this.options.maxArticles;
+
     for (;;) {
+      if (maxArticles !== undefined && summary.claimed >= maxArticles) {
+        return summary;
+      }
+
+      if (this.options.isRateLimited?.() === true) {
+        summary.rateLimited = true;
+        return summary;
+      }
+
       if (this.options.isCancelled?.() === true) {
         summary.cancelled = true;
         return summary;

@@ -6,6 +6,7 @@ import {
   DEFAULT_LLM_MAX_OUTPUT_TOKENS,
   DEFAULT_LLM_TIMEOUT_MS,
   DEFAULT_PORT,
+  DEFAULT_SCHEDULE_CRON,
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
   DEFAULT_TIMEZONE,
   MAX_LLM_MAX_OUTPUT_TOKENS,
@@ -29,6 +30,11 @@ const envSchema = z.object({
     .min(MIN_SHUTDOWN_TIMEOUT_MS)
     .max(MAX_SHUTDOWN_TIMEOUT_MS)
     .default(DEFAULT_SHUTDOWN_TIMEOUT_MS),
+
+  // In-process daily schedule. The expression is validated by `node-cron` when the
+  // scheduler starts rather than here, so this module keeps its single job of
+  // reading and typing the environment.
+  SCHEDULE_CRON: z.string().min(1).default(DEFAULT_SCHEDULE_CRON),
 
   // LLM settings. Every one has a default except the credential, so an
   // environment with no LLM configuration still boots.
