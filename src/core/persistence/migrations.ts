@@ -301,11 +301,149 @@ export const ARTICLE_CONTENTS_MIGRATION: Migration = {
   ],
 };
 
+/**
+ * v5: M7.0 Processing State (S1 §9, §10; `CLM-1`, `CLM-2`, `CLM-5`..`CLM-7`,
+ * `CLM-10`, `CLM-12`, `CLM-18`, `CLM-19`; `A.1`, `A.2`, `A.10`).
+ *
+ * Two tables, separate from `articles` and from derived content (`CLM-14`):
+ * the Article Lifecycle and one row per `(lifecycle, processing_version)`.
+ *
+ * ## Soft reference outward, real key inward
+ *
+ * `processing_lifecycle.article_id` carries **no** foreign key. `articles` and
+ * its children cascade on delete, so a key here would delete processing history
+ * — and with it the evidence a notification may still depend on — whenever the
+ * 168-hour retention sweep ran (`A.10`, `OUT-26`).
+ *
+ * `processing_job` does reference its lifecycle, but **without** `ON DELETE
+ * CASCADE`. Deleting a lifecycle row must not silently destroy job history:
+ * when those rows are removed is undecided (`SPEC-GAP-15`, S1 §23 O-3), so the
+ * schema makes the deletion deliberate instead of automatic.
+ *
+ * ## Terminality is a marker, not a state name
+ *
+ * `CLM-1` fixes `terminal_reason IS NOT NULL` as the terminal marker and
+ * `CLM-2` excludes such rows from Claim. The four outcome *names* are **not**
+ * encoded: the terminal-reason vocabulary is undecided (`CLM-9`, L-01), so the
+ * column stores whatever marker the caller supplies and the CHECK only enforces
+ * that a terminal row has one.
+ *
+ * `state` is limited to the three shapes this schema can actually verify —
+ * `pending`, `running`, `terminal` — so an illegal combination is
+ * unrepresentable rather than merely discouraged, following the v4 precedent.
+ * A `pending` row has no lease and fewer than three attempts; a `running` row
+ * has a complete lease and at least one attempt; a `terminal` row has a marker
+ * and no lease. An exhausted job (`attempts = 3`) is therefore never `pending`:
+ * it stays `running` until recovery terminalizes it (`CLM-8`, `CLM-13`), and it
+ * can never be claimed again (`CLM-10`).
+ *
+ * `typeof(...) = 'integer'` guards repeat the v4 reasoning: SQLite's INTEGER
+ * affinity stores `1.5` as REAL, and `BETWEEN 0 AND 3` would accept it.
+ */
+export const PROCESSING_STATE_MIGRATION: Migration = {
+  version: 5,
+  name: 'processing_state',
+  statements: [
+    `CREATE TABLE processing_lifecycle (
+      lifecycle_id       TEXT    PRIMARY KEY NOT NULL,
+      article_id         TEXT    NOT NULL,
+      published_version  INTEGER NOT NULL DEFAULT 0,
+      published_revision INTEGER NOT NULL DEFAULT 0,
+      opened_at          TEXT    NOT NULL,
+      closed_at          TEXT        NULL,
+      abandoned_at       TEXT        NULL,
+      CHECK (typeof(published_version) = 'integer'),
+      CHECK (typeof(published_revision) = 'integer'),
+      CHECK (published_version >= 0),
+      CHECK (published_revision >= 0)
+    )`,
+    `CREATE UNIQUE INDEX idx_processing_lifecycle_open
+       ON processing_lifecycle (article_id) WHERE closed_at IS NULL`,
+    `CREATE TABLE processing_job (
+      lifecycle_id       TEXT    NOT NULL
+                                 REFERENCES processing_lifecycle (lifecycle_id),
+      processing_version INTEGER NOT NULL,
+      state              TEXT    NOT NULL
+                                 CHECK (state IN ('pending','running','terminal')),
+      attempts           INTEGER NOT NULL DEFAULT 0,
+      lease_owner        TEXT        NULL,
+      lease_token        TEXT        NULL,
+      lease_expires_at   INTEGER     NULL,
+      failure_code       TEXT        NULL,
+      terminal_reason    TEXT        NULL,
+      created_at         TEXT    NOT NULL,
+      updated_at         TEXT    NOT NULL,
+
+      PRIMARY KEY (lifecycle_id, processing_version),
+      CHECK (typeof(processing_version) = 'integer'),
+      CHECK (typeof(attempts) = 'integer'),
+      CHECK (attempts BETWEEN 0 AND 3),
+      CHECK (lease_expires_at IS NULL OR typeof(lease_expires_at) = 'integer'),
+
+      CHECK (
+        (state = 'pending'
+          AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL
+          AND terminal_reason IS NULL AND attempts < 3)
+     OR (state = 'running'
+          AND attempts BETWEEN 1 AND 3
+          AND lease_owner IS NOT NULL AND lease_token IS NOT NULL
+          AND lease_expires_at IS NOT NULL
+          AND terminal_reason IS NULL)
+     OR (state = 'terminal'
+          AND terminal_reason IS NOT NULL
+          AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+      )
+    )`,
+    `CREATE UNIQUE INDEX idx_processing_job_lease_token
+       ON processing_job (lease_token) WHERE lease_token IS NOT NULL`,
+    `CREATE INDEX idx_processing_job_claimable
+       ON processing_job (state, processing_version, attempts)`,
+  ],
+};
+
+/**
+ * D6-style migration: the latest-only AI-derived record.
+ *
+ * `article_id` is a **plain value, not a foreign key** (`SPEC-GAP-15`, Appendix
+ * A.10 of the M7.0 register). Original content expires at 168 hours while
+ * derived content lives for 720, and `RET-5` forbids original-content expiry
+ * from cascade-deleting unexpired derived content, so an `ON DELETE CASCADE`
+ * here would break retention: the article row going away must not take the
+ * Traditional Chinese title and summary with it.
+ *
+ * The primary key on `article_id` makes the record 1:1 with the article and
+ * therefore latest-only. Whether derived content needs version history is still
+ * open (`SPEC-GAP-04`); if it does, the next migration adds the version column
+ * rather than this one guessing at it.
+ *
+ * `title_zh` and `summary_zh` are required and non-empty: a row without either
+ * cannot serve as a notification source, and the empty string is not a value a
+ * producer can legitimately mean here.
+ */
+export const ARTICLE_DERIVED_MIGRATION: Migration = {
+  version: 6,
+  name: 'article_derived',
+  statements: [
+    `CREATE TABLE article_derived (
+      article_id  TEXT PRIMARY KEY NOT NULL,
+      title_zh    TEXT NOT NULL,
+      summary_zh  TEXT NOT NULL,
+      created_at  TEXT NOT NULL,
+      updated_at  TEXT NOT NULL,
+
+      CHECK (length(title_zh) > 0),
+      CHECK (length(summary_zh) > 0)
+    )`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   INITIAL_MIGRATION,
   INSERTION_ORDER_AND_PRIMARY_SOURCE_MIGRATION,
   PROVENANCE_IDENTITY_AND_SOURCE_ORDER_MIGRATION,
   ARTICLE_CONTENTS_MIGRATION,
+  PROCESSING_STATE_MIGRATION,
+  ARTICLE_DERIVED_MIGRATION,
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {

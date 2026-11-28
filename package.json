@@ -24,7 +24,9 @@
     "ingest": "node --env-file-if-exists=.env --import tsx src/cli/ingest.ts",
     "ingest:prod": "node dist/cli/ingest.js",
     "extract": "node --env-file-if-exists=.env --import tsx src/cli/extract.ts",
-    "extract:prod": "node dist/cli/extract.js"
+    "extract:prod": "node dist/cli/extract.js",
+    "recover": "node --env-file-if-exists=.env --import tsx src/cli/recover.ts",
+    "recover:prod": "node dist/cli/recover.js"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",

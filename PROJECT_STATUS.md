@@ -1,6 +1,7 @@
 # Kou News Engine — Project Status & Handoff
 
-Last updated: 2026-11-24 (M6.0 documentation reconciliation: status refreshed against verified post-merge repository state — ruleset active, PR #1 merged, M5.1 reclassified PARTIAL, retention requirements recorded, Gemini model-ID validity recorded as unverified)
+Last updated: 2026-11-26 (Phase 1.15 documentation-only M-01 cross-section policy consistency correction, independently audited at Phase 1.16 with the verdict PASS WITH FINDINGS — L-01 and L-02 remain OPEN and are carried into Phase 2 planning prerequisites. Every Processing, Recovery, Claim, Outbox delivery, correction, alert and retention feature remains NOT IMPLEMENTED — see §6)
+Previous update: 2026-11-24 (M6.0 documentation reconciliation: status refreshed against verified post-merge repository state — ruleset active, PR #1 merged, M5.1 reclassified PARTIAL, retention requirements recorded, Gemini model-ID validity recorded as unverified)
 
 ## 1. Purpose
 
@@ -324,12 +325,88 @@ explicitly not resolved by M4.2 and has not been closed since.
   exposed but not called by any production path; wiring a consumer is a later
   milestone. (Was unassigned at M4.2.)
 - **Original-content retention: `NOT IMPLEMENTED` — requirement recorded only.**
-  The Owner-confirmed requirements (168-hour clock from first successful
-  download; separate storage of original content and summaries; rediscovery must
-  not reset the clock) are stated in `docs/architecture.md` under
-  _Original-content retention (planned)_. No retention behaviour exists and no
-  schema supports it yet. A new immutable first-download timestamp is a
-  prerequisite. **The deletion mechanism is pending an Owner decision.**
+  The authoritative rules are stated in `docs/architecture.md` under
+  _Original-content retention (planned)_; this file does not restate them. The
+  168-hour period now runs from the **most recent discovery** of an article, so
+  rediscovery extends it, while the first discovery is recorded once per data
+  lifecycle and is never overwritten (the `first_seen_at` / `last_seen_at`
+  concepts; their column names, tables and types are undecided). No retention
+  behaviour exists and no schema supports it yet. **The deletion scope is
+  Owner-decided** — full deletion of the content, the system-managed copies of
+  the original media, the identifying records and the timestamp records, with no
+  tombstone — but the **physical deletion mechanism and its verification standard
+  are still to be specified**; WAL, freelist, backups and external media remain
+  unresolved, and none of this is a secure-erasure guarantee. Derived-content
+  retention is unchanged: 720 hours from successful generation and persistence,
+  never removed by original-content expiry, with the source URL kept for the
+  derived record's lifetime. The derived record stores **its own copy** of that
+  URL and the Traditional Chinese title, so it does not depend on the article row;
+  the original title is not required. Empty, failed and pending rows follow the
+  same 168-hour clock. If the same news item is discovered again after deletion, a
+  new lifecycle and new derived records may result, and that duplication is
+  accepted, not an error. Open technical details are tracked as `SPEC-GAP-01`
+  and `SPEC-GAP-02` in
+  `docs/design/m7-0-ai-news-processing-pipeline.md`.
+- **Notification, correction and alert policy: `NOT IMPLEMENTED` — decisions recorded only.**
+  M7.0 now fixes the Article Lifecycle identity the Outbox stores, at most one
+  initial-success notification per lifecycle, AI-judged major-correction
+  notifications with their own evidence and 720-hour retention, persistence before
+  sending, and the requirement that an exhausted-attempts alert be durably
+  persisted before original content is deleted. None of this exists: there is no
+  outbox table, no delivery path, no correction record and no alert channel.
+  `OUT-1`'s original unique key was superseded on 2026-11-26 by one that treats the
+  processing version as provenance rather than as notification identity. On the same
+  date the Owner fixed three further points: correction evidence is an AI-generated
+  summary only, with verbatim text and excerpts prohibited; Outbox retention is
+  independent of the 168-hour deletion set, so no Outbox event or payload is deleted
+  with the article, and an alert awaiting manual intervention is never silently
+  deleted; and abandonment stops all subsequent automatic processing for the
+  lifecycle, cancelling queued work, invalidating claims, and allowing already-
+  persisted Outbox events to finish. M7.0 also carries a **non-normative** technical
+  design appendix (lifecycle identity, publication protocol, correction identity,
+  superseded and expired-unprocessed jobs, retention boundaries); it is a proposal
+  only.
+  A further Owner decision (2026-11-26, Phase 1.9) covers the case where an ordinary
+  notification's automatic retries are exhausted: the event enters manual intervention
+  (retry, hold or abandon), is retained until that intervention is completed, and only
+  then starts its independent Outbox retention period. It stays a separate event type
+  from an alert, and delivery remains at-least-once. `OUT-26` additionally requires
+  every Outbox payload to be self-contained, so delivery never depends on the article,
+  lifecycle or correction row still existing, and never carries verbatim original text.
+  Processing jobs now have four distinguished terminal outcomes — `failed_terminal`,
+  `superseded`, `expired-unprocessed` and `cancelled` — only the first of which raises
+  an alert.
+  The Phase 1.11 closure adds three documentation rules, none of them implemented.
+  `CLM-19` makes version retirement a rule wherever a job is met, not only at
+  publication: once a version publishes, every unfinished lower-version job is
+  terminalized as `superseded` at Claim, at the startup recovery check and at
+  publication, consuming no attempt and raising no alert, while a job whose version
+  equals the published version is treated as already succeeded. `OUT-25` now states
+  that the delivery outcome and the manual-intervention outcome are separate, so an
+  abandoned event is never recorded as `sent` and cleanup tests the two conditions
+  separately; a manual retry neither resets nor extends `OUT-6`..`OUT-8`, and how it is
+  accounted for remains open. `SPEC-GAP-08` and `-18` carry the corresponding open
+  detail.
+  Phase 1.13 then closed three state-machine gaps in the documentation only. Version
+  retirement now takes precedence over attempt exhaustion for a job with no committed
+  terminal outcome, so an exhausted but stale job becomes `superseded` without an
+  alert, while a `failed_terminal` or `succeeded` committed earlier is never
+  retroactively rewritten. Every Worker write — success, retryable failure,
+  non-retryable failure or exhaustion report — is subject to the same token, lease and
+  version guard, so a stale Worker cannot manufacture a `failed_terminal` outcome or
+  its alert. The two meanings of abandonment are stated as independent: abandoning an
+  Article Lifecycle stops automatic processing for that lifecycle without abandoning
+  any notification, and abandoning one Outbox notification affects only that event
+  without abandoning the lifecycle. None of this is implemented; the transaction
+  mechanism and its ordering remain `SPEC-GAP-08`, and Phase 1 closure has not yet
+  been independently verified.
+  Explicitly `NOT IMPLEMENTED`: the Processing pipeline and its state store, claim and
+  lease fencing for Processing, the publication protocol, the Outbox table and every
+  delivery path, correction records and correction notifications, the alert channel,
+  any manual-intervention interface (for alerts or for dead notifications), and every
+  retention or cleanup job. No retention duration for the Outbox has been chosen. Open
+  technical details are tracked as `SPEC-GAP-05`, `-07`, `-08`, `-10`, `-15`, `-17`
+  and `-18` in `docs/design/m7-0-ai-news-processing-pipeline.md`.
 - **Gemini model-ID validity: `NOT VERIFIED`.** The approved mapping in §5 uses
   the identifiers `gemini-3.8-flash`, `gemini-3.5-flash-lite` and
   `gemini-4-argon`. Their validity has **not** been independently verified, and

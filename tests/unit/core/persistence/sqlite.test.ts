@@ -353,8 +353,11 @@ describe('runMigrations — first run', () => {
 
     expect(tableNames(db)).toEqual([
       'article_contents',
+      'article_derived',
       'article_sources',
       'articles',
+      'processing_job',
+      'processing_lifecycle',
       'schema_migrations',
     ]);
     db.close();
@@ -375,6 +378,9 @@ describe('runMigrations — first run', () => {
       'idx_articles_fetched_at',
       'idx_articles_inserted_order',
       'idx_articles_published_at',
+      'idx_processing_job_claimable',
+      'idx_processing_job_lease_token',
+      'idx_processing_lifecycle_open',
     ]);
     db.close();
   });

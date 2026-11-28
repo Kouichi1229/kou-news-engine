@@ -658,14 +658,44 @@ requirements below are Owner-confirmed.
 
 ### Retention clock
 
-- The clock starts at the **first successful download** of an article — that is,
-  the moment the article body is fetched and stored.
-- The period is **7 × 24 hours (168 hours)** from that instant. It is **not**
-  seven calendar days ending at midnight, and it does not reset at a timezone
-  boundary.
-- **Rediscovery of the same article must not restart or extend the clock.** The
-  first successful download timestamp remains the authoritative reference for
-  the life of the record.
+Two observation timestamps are recorded for an article:
+
+- **First observation** — when the system first discovered the article. It is
+  written once and **never modified** for the life of the data lifecycle, even
+  if that first download or extraction failed.
+- **Most recent observation** — when the system last discovered the article. It
+  is updated on **every** rediscovery, whether or not the download or extraction
+  that followed succeeded.
+
+The retention period is **7 × 24 hours (168 hours)** measured from the **most
+recent observation**. It is **not** seven calendar days ending at midnight, and
+it does not reset at a timezone boundary.
+
+The consequences are stated explicitly because they invert the earlier draft of
+this section:
+
+- **Rediscovery extends the period.** Every rediscovery moves the most recent
+  observation forward, so an article rediscovered at least once every 168 hours
+  never expires.
+- **The first observation is not the retention reference.** It records when the
+  current data lifecycle began; it does not drive expiry. The most recent
+  observation is the retention reference.
+- **Success is irrelevant to both timestamps.** A failed download or a failed
+  extraction still counts as an observation.
+- **A new lifecycle starts from zero.** Once the original content has been fully
+  deleted, a later rediscovery of the same article is a new data lifecycle with
+  a new first observation, and the 168 hours run from the new most recent
+  observation.
+
+This section states the behaviour and is authoritative for it. The physical
+column names, table placement, types and migration are specified in the M7.0
+design document (`SPEC-GAP-01`, still open).
+
+The clock applies to the **article record**, not to the presence of content. An
+article whose download or extraction failed — including one that produced no
+usable body — is retained on the same 168-hour clock as one whose body was
+stored. The extraction-status cases are recorded in the M7.0 design document
+(`EXT-1`..`EXT-3`).
 
 ### Separate storage of original content and derived records
 
@@ -676,23 +706,26 @@ requirements below are Owner-confirmed.
 - Summaries, indexes, and classifications are retained **long-term** for
   historical search and trend analysis.
 
-### No existing timestamp column is a suitable anchor
+### No existing timestamp column is a confirmed fit
 
-This is a schema finding, not a design preference. Each candidate column fails
-the "rediscovery must not reset the clock" requirement or measures the wrong
-event:
+The requirement now has two parts, and no existing column is confirmed to
+satisfy either of them:
 
-| Column | What it records | Why it is unsuitable |
+| Required fact | Behaviour it must have |
+| --- | --- |
+| First observation | Written once, never modified, survives a failed download and a failed extraction |
+| Most recent observation | Updated on every rediscovery, including rediscoveries whose download or extraction fails |
+
+| Column | What it records | Relationship to the requirement |
 | --- | --- | --- |
-| `articles.fetched_at` | When the ingestion run processed the feed entry | **Rewritten on rediscovery.** The ingestion upsert refreshes it via `ON CONFLICT (id) DO UPDATE`, so re-collecting an article resets it. |
-| `article_contents.extracted_at` | When extraction last completed | **Rewritten on re-extraction.** A completed extraction sets it again, and bumping `EXTRACTOR_VERSION` re-queues every stored article, resetting it across the whole table. |
-| `article_sources.first_seen_at` | When a provenance identity was first observed in a feed | Measures **feed observation**, not first successful article download. It is also **per provenance row**, not per article, so one article can carry several different values. |
+| `articles.fetched_at` | When the ingestion run processed the feed entry | Rewritten on rediscovery by the ingestion upsert (`ON CONFLICT (id) DO UPDATE`). That matches "most recent observation" **only if** the upsert runs for every rediscovery, including entries later rejected by the download or extraction stage. That condition is not established. |
+| `article_contents.extracted_at` | When extraction last completed | Measures success, not observation. A failed or skipped extraction leaves it stale or unset, so it cannot record a rediscovery that failed. |
+| `article_sources.first_seen_at` | When a provenance identity was first observed in a feed | Closest in name to "first observation", but it is **per provenance row**, not per article, so one article can carry several values, and it is never updated on rediscovery. |
 
-**A new immutable first-download timestamp will therefore be required before
-retention can be implemented.** It must be written once, at the transition to a
-successfully extracted article, and never updated afterwards — in particular not
-by a re-extraction. This document does not prescribe that column's name, type,
-or migration; it records only that an immutable anchor is a prerequisite.
+**No conclusion is drawn here about which column, table or type to use.** What is
+established is that the behaviour above must be implemented before retention can
+be enforced. Whether that means a new column, a new table, or a repurposed
+existing column is `SPEC-GAP-01` in the M7.0 design document and remains open.
 
 ### Relationship to cascading deletes
 
@@ -705,19 +738,78 @@ If future summary, index, or classification storage were given the same
 cascade, expiring original content would **delete the long-term records too**,
 which directly violates the requirement above.
 
-> **Design consideration, not an approved decision.** Any future summary, index,
-> or classification table must avoid cascading from `articles` in a way that
-> lets original-content expiry remove long-term data. The specific foreign-key
-> design (no foreign key, `ON DELETE SET NULL`, a soft reference, or a separate
-> table) is deliberately **not** decided here.
+Deleting original content is now a decided requirement (see _Deletion scope_
+below), so this cascade is a **hard constraint**, not a hypothetical: any future
+summary, index or classification table that cascades from `articles` would be
+deleted together with the original content, which the requirements above forbid.
 
-### Deletion mechanism — pending Owner decision
+> **Constraint, not a schema decision.** Any future summary, index or
+> classification table must not be removed by original-content expiry. The
+> specific foreign-key design (no foreign key, `ON DELETE SET NULL`, a soft
+> reference, or a separate table) is deliberately **not** decided here.
 
-**The deletion mechanism is undecided.** The Owner has not chosen between hard
-deletion, soft deletion, a hybrid, deleting the whole `article_contents` row, or
-nulling `content_text` while keeping a tombstone. This document must not be read
-as endorsing any of them, and no implementation may pick one without an explicit
-Owner decision.
+### Deletion scope
+
+The **scope** is Owner-decided (Batch A, 2026-11-26). When an article's original
+content expires, the system deletes:
+
+- the original content;
+- the system-managed copies of the original article media;
+- the identifying records;
+- the timestamp records.
+
+No tombstone or other record is kept whose purpose is to block a future
+re-download. A later rediscovery of the same article is allowed and starts a new
+data lifecycle, with a new first observation. Any duplicate derived records or
+notifications that result from that rediscovery are accepted; they are not an
+error to be prevented by a tombstone or a permanent identifier (see the M7.0
+design document, `SPEC-GAP-02`).
+
+The **physical mechanism is not decided**: whether a SQL `DELETE` is sufficient,
+how WAL pages, freelist pages and backups are handled, how external media storage
+is deleted, and what verification standard applies. The scope decision must not
+be read as answering any of these.
+
+Two boundaries the scope decision does **not** cross:
+
+- It does not authorise deleting AI-derived records that are still inside their
+  720-hour period, and it does not merge "original article media" with
+  "AI-derived content". Derived retention is governed by the rules above.
+- It does not turn `SQL DELETE` into a secure erasure (see _Residual copies_).
+
+Deletion must not remove an article while its processing work still needs to be
+terminalized and an alert event still needs to be durably persisted. That is a
+sequencing constraint on the deleter, not a change to the retention period: the
+article is not kept longer, and no long-lived identity record is created. The
+processing-side requirements are recorded in the M7.0 design document (`CLM-15`,
+`OUT-18`), which owns everything outside original-content retention.
+
+Outbox events and their payloads are **not** part of this deletion set. They follow
+their own retention policy, recorded in the M7.0 design document (`OUT-25`, with the
+durations still open in `OUT-14` and the mechanism in `OUT-16`), and an alert event
+may not be discarded while the manual intervention it requires is outstanding. This
+changes neither the 168-hour period nor any other period, and it chooses no
+retention duration.
+
+The four retention boundaries are separate:
+
+- **Original content** — 168 hours from the most recent observation; deleted as
+  described above.
+- **AI-derived content** — 720 hours from its own successful generation and
+  persistence; never removed by original-content expiry.
+- **Correction events and their AI-generated evidence summaries** — 720 hours on
+  the same derived-content rule; they never extend the 168-hour period.
+- **Outbox events and payloads** — an independent period, not yet chosen.
+
+Only the first of these is governed here; the other three are governed by the
+M7.0 design document.
+
+Closing an Article Lifecycle does not authorise keeping identifying records beyond
+this scope: a lifecycle row is not a reason to retain one, and no long-lived
+lifecycle identity record is created. Abandonment of a lifecycle neither pauses nor
+extends the period. When closed lifecycle rows and their jobs are physically removed
+is a technical detail of the M7.0 design document; it cannot postpone this deletion.
+Outbox payloads are self-contained, so delivery never depends on those rows.
 
 ### Residual copies
 
@@ -736,6 +828,10 @@ residual locations:
 - **Logs and caches.** Any future logging, tracing, or caching layer that copies
   article bodies becomes another copy that retention does not reach. No such
   copy exists today.
+
+The deletion-scope decision above does not change any of this. It is a product
+decision about which records must not survive; it is not a claim that every
+physical copy is unrecoverable, and no implementation may present it as one.
 
 ## LLM provider boundary (I7-1b)
 

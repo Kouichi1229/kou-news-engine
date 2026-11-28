@@ -1,5 +1,8 @@
+import { DatabaseSync } from 'node:sqlite';
+
 import { describe, expect, it } from 'vitest';
 
+import { MIGRATIONS, runMigrations } from '../../../src/core/persistence/migrations.js';
 import { openDatabase } from '../../../src/core/persistence/sqlite.js';
 
 /**
@@ -51,9 +54,31 @@ function insert(database: ReturnType<typeof freshDatabase>, row: Row): void {
 
 describe('v4 migration', () => {
   it('reaches schema version 4', () => {
-    const database = freshDatabase();
-    expect(database.version).toBe(4);
-    database.close();
+    // `freshDatabase()` opens through `openDatabase`, which applies every
+    // migration and therefore no longer stops at v4. The v4 result is only
+    // observable by applying the v1-v4 prefix, so this asserts the prefix
+    // instead of the head version, which would silently follow every later
+    // migration.
+    const db = new DatabaseSync(':memory:');
+    runMigrations(
+      db,
+      MIGRATIONS.filter((migration) => migration.version <= 4),
+    );
+
+    const applied = db
+      .prepare('SELECT MAX(version) AS version FROM schema_migrations')
+      .get() as { version: number };
+    expect(applied.version).toBe(4);
+
+    // Proof that the prefix stopped at v4: the v5 tables are absent.
+    const laterTables = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'processing_%' ORDER BY name",
+      )
+      .all() as Array<{ name: string }>;
+    expect(laterTables).toEqual([]);
+
+    db.close();
   });
 
   it('creates the article_contents table', () => {

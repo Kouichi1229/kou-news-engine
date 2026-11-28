@@ -1,9 +1,9 @@
-# M7.0 Phase 2 — SPEC-GAP-07 P-5：Outbox 完整 Schema 設計提案（Rev 2）
+# M7.0 Phase 2 — SPEC-GAP-07 P-5：Outbox 完整 Schema 設計提案（Rev 4）
 
 | 項目 | 內容 |
 | --- | --- |
 | 文件 | P-5 Outbox Complete Schema Design Proposal |
-| 版次 | **Rev 3**（Rev 1：初稿；Rev 2：依 P5-OD 與 RC-1～RC-10 修訂；Rev 3：依第二輪審查 B-1～B-6、SI-1／SI-2 修訂） |
+| 版次 | **Rev 4**（Rev 1：初稿；Rev 2：依 P5-OD 與 RC-1～RC-10 修訂；Rev 3：依第二輪審查 B-1～B-6、SI-1／SI-2 修訂；Rev 4：納入 Owner 凍結之 Payload 決策並記錄 MVP 實作） |
 | 狀態 | **`PROPOSED — NOT APPROVED`** |
 | 性質 | 設計提案。**不授予任何實作授權，不構成已核准 schema。** |
 | 修訂依據 | P5-OD-01～P5-OD-05（Owner Decisions）；第一輪審查 RC-1～RC-10；第二輪審查 B-1～B-6、SI-1／SI-2 |
@@ -23,6 +23,14 @@
 - **B-6**：CC-5 加入 `held_at IS NULL`，使 Hold 與有效 Manual Lease 在資料庫層互斥；Hold CAS 同步加 `manual_lease_token IS NULL`。
 - **SI-1／SI-2**：確認 Rev 2 已修正，Rev 3 檢查全篇無殘留。
 - Readiness：Full P-5 Design 與 Implementation Readiness 均降為 **`NOT READY`**（B-3／B-5／RC-10 未解）。
+
+**Rev 4 修訂摘要。** 納入 Owner 於 2026-11-28 凍結的 Outbox Payload 決策，並記錄其 MVP 實作：
+- **Payload 結構凍結**：Common Payload Header（`schema_version`／`event_type`／`lifecycle_id`／`source_url`）＋ Event-Type Discriminated Body，三型 `initial_success`／`exhausted_alert`／`correction`。詳見 **§3.2**。
+- **C-4 解除**：`OUT-11` 的 payload 欄位與 schema 由 Owner 決議凍結（不再是本文件的未決項）；`OUT-11` 在 M7.0 規格本文中的 `OPEN` 狀態未由本文件改寫。
+- **序列化與上限凍結**：JSON／SQLite `TEXT`／UTF-8 位元組上限（總量 65,536 bytes，逐欄上限見 §3.2.3）；超限拒絕、不截斷。
+- **不可變性凍結**：payload 持久化後永不修改；Retry 重用同一持久化字串；可變狀態（Delivery Status／Lease／Intervention）留在 envelope 與既有狀態表。
+- **實作落點**：`src/modules/outbox/payload.{constants,types,errors,serializer}.ts`；單元測試 32 項、整合測試 6 項。
+- **仍然未解**：本文件其餘項目（B-3、B-5、RC-10、C-5～C-8）不因 Rev 4 而改變；文件整體狀態維持 **`PROPOSED — NOT APPROVED`**。
 
 ---
 
@@ -106,7 +114,7 @@
 
 `[OPEN]` `next_attempt_at` 對 `sent`／`dead` 事件的 sentinel 值未定（見 §12 TR-3）。
 `[OPEN]` `attempts` 的 0–8 範圍未以 CHECK 強制（六條預算不足），僅能靠應用層（見 §12 TR-2）。
-`[OPEN]` `payload` 內部結構屬 `OUT-11`。
+`[CONFIRMED — OWNER 2026-11-28]` `payload` 內部結構已凍結，見 **§3.2**。`OUT-11` 在 M7.0 規格本文中仍標示 `OPEN`，本文件不改寫該規格；凍結來源是本文件的 Owner 決策，而非規格條文。
 
 ### 3.1 非規範性 DDL（示意，**未核准**）
 
@@ -136,6 +144,133 @@ CREATE TABLE outbox_event (
   CONSTRAINT chk_oe_terminal    CHECK (/* CC-3 */ 1)
 );
 ```
+
+### 3.2 Payload Schema（Owner 凍結，2026-11-28）
+
+`[CONFIRMED — OWNER 2026-11-28]` 本節內容為 Owner 凍結的 Payload MVP 決策，並已實作。它是本文件中**唯一**已獲實作授權的區塊（§14 的一般禁止不適用於本節）。
+
+#### 3.2.1 結構
+
+Payload 分兩層，**不是** 18 欄 envelope，也**不是** provider request body：
+
+- **Common Header**（三型共用）：`schema_version`、`event_type`、`lifecycle_id`、`source_url`
+- **Body**（依 `event_type` 判別）：
+
+| `event_type` | Body 欄位 |
+| --- | --- |
+| `initial_success` | `headline`、`summary` |
+| `exhausted_alert` | `processing_version`、`terminal_reason`、`failure_category`、`attempts_consumed`、`max_attempts` |
+| `correction` | `fact_item`、`previous_value`、`corrected_value`、`evidence_summary` |
+
+`[CONFIRMED — OWNER 2026-11-28]` 所有 JSON key 使用 `snake_case`；不要求 key 固定順序，不要求 canonical JSON。
+
+`[CONFIRMED — OWNER 2026-11-28]` **自足性**（`OUT-26` 的落實）：`correction` 必須內嵌完整證據內容，**不得**只保存 correction record 的 id，也不得於投遞時查詢 article／lifecycle／correction 任何一列。
+
+`[CONFIRMED — OWNER 2026-11-28]` `evidence_summary` 必須是 AI 生成的摘要，不得包含來源文章逐字原文或逐字節錄（`OUT-22`、`OUT-26`）。
+
+#### 3.2.2 範例
+
+```json
+{
+  "schema_version": 1,
+  "event_type": "exhausted_alert",
+  "lifecycle_id": "lifecycle-uuid",
+  "source_url": "https://example.com/article",
+  "body": {
+    "processing_version": 2,
+    "terminal_reason": "max_attempts_exhausted",
+    "failure_category": "extraction_failure",
+    "attempts_consumed": 3,
+    "max_attempts": 3
+  }
+}
+```
+
+```json
+{
+  "schema_version": 1,
+  "event_type": "initial_success",
+  "lifecycle_id": "lifecycle-uuid",
+  "source_url": "https://example.com/article",
+  "body": { "headline": "AI 模型發布", "summary": "摘要內容" }
+}
+```
+
+```json
+{
+  "schema_version": 1,
+  "event_type": "correction",
+  "lifecycle_id": "lifecycle-uuid",
+  "source_url": "https://example.com/article",
+  "body": {
+    "fact_item": "funding_amount",
+    "previous_value": "100M USD",
+    "corrected_value": "120M USD",
+    "evidence_summary": "AI 生成摘要說明金額已由 100M 更正為 120M USD。"
+  }
+}
+```
+
+#### 3.2.3 大小上限
+
+`[CONFIRMED — OWNER 2026-11-28]` 完整序列化 JSON 最大 **65,536 UTF-8 bytes**，三型共用。超限**拒絕建立**，**不得截斷**。
+
+| 欄位 | 最大 UTF-8 bytes |
+| --- | ---: |
+| `lifecycle_id` | 128 |
+| `source_url` | 4,096 |
+| `headline` | 2,048 |
+| `summary` | 16,384 |
+| `terminal_reason` | 128 |
+| `failure_category` | 128 |
+| `fact_item` | 1,024 |
+| `previous_value` | 4,096 |
+| `corrected_value` | 4,096 |
+| `evidence_summary` | 8,192 |
+
+`[INFERENCE]` 目前逐欄上限總和約 22.6 KB，因此在欄位上限維持不變的前提下，65,536 bytes 的總量上限**不可達**；它保留為未來放寬逐欄上限時的防護線。讀取路徑同樣套用該上限，故超出上限的既有列會被拒絕解析而非送給 Worker。
+
+#### 3.2.4 驗證規則
+
+`[CONFIRMED — OWNER 2026-11-28]`
+
+- 必填欄位不得缺失；**欄位缺失** 與 **顯式 `null`** 必須區分為不同錯誤。
+- Nullable 與 Optional 分開處理（本版所有欄位皆 required 且 non-nullable）。
+- 空字串不允許（本版所有字串欄位皆須非空）。
+- 已知欄位驗證型別與 UTF-8 長度；數值欄位驗證整數與範圍（`processing_version >= 1`、`attempts_consumed >= 0`、`max_attempts >= 1`）。
+- 未知欄位**忽略**（剝除），不視為錯誤。
+- 未知 `event_type` 與不支援的 `schema_version` **拒絕解析**。
+- `schema_version` 為整數；非整數視為欄位錯誤，整數但不支援視為版本錯誤。
+
+#### 3.2.5 序列化與不可變性
+
+`[CONFIRMED — OWNER 2026-11-28]`
+
+- 格式：JSON；SQLite 儲存型別 `TEXT`。
+- 不新增 SHA-256 欄位、不做多層 hash 驗證、不加入數位簽章或防竄改機制。
+- Payload 持久化後**永不修改**；Retry 必須重用完全相同的持久化字串；內容變更須建立新事件。
+- Delivery Status、Lease、Manual Intervention 等可變狀態**不得**放入 payload（留在 envelope 與既有狀態表）。
+- 解析結果為唯讀檢視；持久化字串才是事實來源。
+
+#### 3.2.6 分層邊界
+
+`[INFERENCE]` 三層不可混同：**envelope**（18 欄，含 `status`／`attempts`／lease，可變）／**payload**（本節，凍結）／**provider request body**（每次投遞組裝，不持久化）。`SPEC-GAP-10` 的通道與 provider 格式未定，故 payload 保持通道中立。
+
+#### 3.2.7 本節未決定的事項
+
+| 項目 | 狀態 | 說明 |
+| --- | --- | --- |
+| `failure_category` 值域 | `OPEN` | M7.0 的 `CLM-4` 固定 `LlmErrorKind` 詞彙，但凍結範例使用 `extraction_failure`（不在該詞彙內）。本版只驗證非空與 ≤128 bytes，不建立封閉值域。 |
+| `event_type` 字面值 | `OPEN`（`SPEC-GAP-07`） | 本版凍結 `exhausted_alert`；Appendix A.6（非規範）寫 `alert`。兩者不可互換。 |
+| `terminal_reason` 詞彙 | `OPEN`（`CLM-9`／L-01） | 本版只驗證非空與 ≤128 bytes。 |
+| correction 內容語意細節 | `OPEN`（`SPEC-GAP-17`） | fact taxonomy、正規化、evidence size limits 未定；本節只凍結欄位與上限。 |
+| 通道與 provider body | `OPEN`（`SPEC-GAP-10`） | 不影響 payload 結構。 |
+
+#### 3.2.8 實作落點與測試
+
+`src/modules/outbox/payload.constants.ts`（上限與字面值）、`payload.types.ts`（zod schema 與型別）、`payload.errors.ts`（錯誤碼）、`payload.serializer.ts`（`validatePayload`／`serializePayload`／`parsePayload`）。
+
+測試：`tests/unit/modules/outbox/payload.serializer.test.ts`（32 項）、`tests/integration/outbox/payload.persistence.test.ts`（6 項）。整合測試使用 `:memory:` 的臨時 probe 表，**不**建立 Outbox 表（本文件仍未核准其欄位，§14）。
 
 ---
 
@@ -595,9 +730,9 @@ CHECK (
 
 | 類別 | 項目 |
 | --- | --- |
-| **已由 Owner Decision 解決** | C-1 → P5-OD-02；C-2 → P5-OD-04；C-3 → P5-OD-03；manual retry 狀態表示 → P5-OD-01；retry 中 abandon → P5-OD-05 |
+| **已由 Owner Decision 解決** | C-1 → P5-OD-02；C-2 → P5-OD-04；C-3 → P5-OD-03；manual retry 狀態表示 → P5-OD-01；retry 中 abandon → P5-OD-05；**C-4（payload schema）→ Owner 2026-11-28 凍結（§3.2）** |
 | **已完成文件修訂（待審查）** | B-1（CC-6 三值邏輯，§7、§7.3）；B-2（跨表身分驗證八條件，§10.1）；B-4（Phase 2 三分支 SET，§10.2）；B-6（Hold／lease 互斥，§7 CC-5、§10 #6、§11.2）；SI-1／SI-2（Rev 2 已修正，Rev 3 複核無殘留） |
-| **仍需 Owner Decision** | **B-3**（Intervention row 建立時機，§4.1、§12.5）；**B-5**（Marker 未提交時的 Recovery outcome 語意，§11.3.1、§12.6）；C-4（`OUT-11`）、C-5（`SPEC-GAP-10`）、C-6（`SPEC-GAP-17`）、C-7（`SPEC-GAP-05`）、C-8（`OUT-14`–`OUT-16`） |
+| **仍需 Owner Decision** | **B-3**（Intervention row 建立時機，§4.1、§12.5）；**B-5**（Marker 未提交時的 Recovery outcome 語意，§11.3.1、§12.6）；C-5（`SPEC-GAP-10`）、C-6（`SPEC-GAP-17`）、C-7（`SPEC-GAP-05`）、C-8（`OUT-14`–`OUT-16`） |
 | **仍需技術驗證** | §10.1 的跨表等價條件能否在同一交易上下文表達；CC-6 修正後於實際 SQLite 的行為；`dead_at` 語意（§10.2）；時間表示一致性 |
 | **尚未完成的技術設計** | Transaction Owner 的落地方式（§12.2）；`manual_lease_attempt_id` 的參照驗證；`next_attempt_at` sentinel；`attempts` 0–8 強制；`result_state` replay |
 | **Implementation Blocker** | **RC-10**（§12.2）；B-3 未決使所有介入流程為條件式設計；`SPEC-GAP-10` 使 Phase 2 無法實作 |
@@ -642,7 +777,7 @@ CHECK (
 
 | # | 問題 | 對本文件的影響 |
 | --- | --- | --- |
-| C-4 | `OUT-11` payload 結構 | 只影響 `payload` 內部，不影響 18 欄 |
+| ~~C-4~~ | ~~`OUT-11` payload 結構~~ — **RESOLVED**（Owner, 2026-11-28；見 §3.2，已實作） | 已凍結，不再影響本文件 |
 | C-5 | `SPEC-GAP-10` provider 通道與能力 | 阻擋 Phase 2 實作，不阻擋 schema |
 | C-6 | `SPEC-GAP-17` correction key | 阻擋 correction 事件建立與其去重驗證 |
 | C-7 | `SPEC-GAP-05` 版本域 | 阻擋 `exhausted:v<n>` 的合法性驗證 |
@@ -696,8 +831,9 @@ CHECK (
 | Index / UNIQUE / FK | **`CONDITIONALLY READY`** | 15 項定義正確；FK 已由 P5-OD-02／03 定案；仍缺 `attempts` 與摘要長度的替代強制；`manual_lease_attempt_id` 無 DB 層參照 |
 | Transaction Composition | **`CONDITIONALLY READY`** | 14 項操作已補三表與 SET（RC-2／RC-5／RC-7／RC-8），並新增 §10.1 八條件與 §10.2 三分支（B-2／B-4）；**B-3 未決使 #6～#13 為條件式**；**#14 受 RC-10 阻擋** |
 | State Transition Model | **`CONDITIONALLY READY`** | 四組矩陣自洽；hold/lease 互斥已明文（B-6）；`dead→sent` 已明列；但 attempt 的 marker-absent 結果語意（B-5）尚未定案 |
-| **Full P-5 Design** | **`NOT READY`** | **B-3**（結構性：決定 1:1 恆存在性與全部介入交易）、**B-5**（語意）、**RC-10**（實作阻擋）三者未解；另有 C-4～C-8 |
-| **Implementation Readiness** | **`NOT READY`** | 上述加上 `SPEC-GAP-10`、`OUT-11`、retention 與 DB abstraction |
+| **Payload Schema（§3.2）** | **`IMPLEMENTED`（MVP）** | Owner 凍結並已實作：三型結構、header 驗證、UTF-8 逐欄上限、64 KiB 上限、不可變與 retry 重用；`failure_category`／`terminal_reason` 值域與 `SPEC-GAP-17`／`SPEC-GAP-10` 仍 `OPEN` |
+| **Full P-5 Design** | **`NOT READY`** | **B-3**（結構性：決定 1:1 恆存在性與全部介入交易）、**B-5**（語意）、**RC-10**（實作阻擋）三者未解；另有 C-5～C-8 |
+| **Implementation Readiness** | **`NOT READY`** | 上述加上 `SPEC-GAP-10`、retention 與 DB abstraction（payload 已實作，但不構成其他區塊可實作的依據） |
 
 `[CONFIRMED]` **評級原則**：文字補充**不等於**技術問題已通過。Rev 3 完成的是「文件修訂」；B-1／B-2／B-4／B-6 屬**已完成修訂、待審查**，仍須經實作階段的技術驗證（例如 §10.1 的跨表等價條件能否在同一交易上下文表達）。
 
@@ -711,6 +847,8 @@ CHECK (
 
 `[CONFIRMED]` 所有 DDL 與索引定義均為**非規範性示意**，不得直接作為 migration 使用。
 
+`[CONFIRMED — OWNER 2026-11-28]` **唯一例外：§3.2 Payload Schema。** Owner 已就 payload 作出凍結決策並授權其 MVP 實作，因此 §3.2 及其明列的實作落點（`src/modules/outbox/payload.*`）不受本節禁止。該例外**不擴張**到 payload 以外的任何事項：Outbox 表、欄位、migration、intervention、attempt、history、worker、recovery 仍不在授權範圍內。
+
 ---
 
 ## 15. Revision History
@@ -720,3 +858,4 @@ CHECK (
 | 2026-11-27 | Rev 1 | 建立 P-5 完整 schema 設計提案：18 欄 envelope（全數 `[PROPOSED]`）、`outbox_intervention`、`provider_attempt`、append-only history、6 條 CHECK、15 項索引、FK 與保留分析、15 項交易矩陣、4 組狀態矩陣、8 項未決（C-1..C-8）、8 項 readiness。 |
 | 2026-11-27 | Rev 2 | 納入 P5-OD-01～05；修正 RC-1（Manual Retry 維持 `dead`，CC-2 不放寬）、RC-2（Phase 2／Recovery 補 `outbox_intervention`，期望列數改 1＋1＋1／1＋1）、RC-3（Abandon 移除恆真項、加入 `status='dead'` 與 `manual_lease_token IS NULL`、同交易清 hold）、RC-4（CC-6 改寫為「全 NULL／全非 NULL」互斥並加三值稽核表）、RC-5（Phase 1 不更新 event）、RC-6（append-only 僅禁 UPDATE，trigger 不阻擋 DELETE）、RC-7（Hold 不更新 event、期望列數 1）、RC-8（所有離開 `leased` 的轉移明列清除三欄；`dead→sent` 須清 `dead_at`）、RC-9（改寫狀態分類，撤回「C-1 唯一影響結構」）、RC-10（新增 Transaction Owner 規範並列為實作阻擋）。新增 `dead→sent` 轉移與 `sent` 事件介入永不完結的說明；交易矩陣由 15 列整併為 14 項（「自動失敗」與「自動重排」為同一 UPDATE）。狀態維持 `PROPOSED — NOT APPROVED`。 |
 | 2026-11-27 | Rev 3 | 依第二輪審查修正：**B-1**（CC-6 加入 `finalized_by IS NOT NULL`，修掉 Rev 2 的殘餘 NULL 漏洞；新增 §7.3 五組反例驗證表；六條 CHECK 三值複核，確認僅 CC-6 受影響）；**B-2**（新增 §10.1 跨表身分驗證八條件，套用於 Marker／Phase 2／Recovery，並明示不得以 `UNIQUE(lease_token)` 取代）；**B-3**（新增 §4.1 與 §12.5，將 Intervention 列建立時機列為 `OPEN — REQUIRES OWNER DECISION`，方案 A／B 對照七個面向，全部介入流程改標為條件式設計）；**B-4**（新增 §10.2，Phase 2 三分支逐欄位 SET，含 `dead→sent` 清 `dead_at`、rejected／unknown 保留 `dead_at`）；**B-5**（新增 §11.3.1 與 §12.6，將 marker 前後的 Recovery 語意差異列為 `OPEN — REQUIRES OWNER DECISION`，不新增第四種 outcome、不改 MI-3c）；**B-6**（CC-5 加入 `held_at IS NULL`、Hold CAS 加入 `manual_lease_token IS NULL`、§11.2 明文 hold/lease 互斥）；**SI-1／SI-2** 複核無殘留。§12.1 改以六類狀態分類（含 Implementation Blocker）；§13 將 Full P-5 Design 與 Implementation Readiness 降為 `NOT READY`。狀態維持 `PROPOSED — NOT APPROVED`。 |
+| 2026-11-28 | Rev 4 | 納入 Owner 凍結的 Outbox Payload 決策並記錄其 MVP 實作：新增 **§3.2 Payload Schema**（Common Header `schema_version`／`event_type`／`lifecycle_id`／`source_url` ＋ 三型 Discriminated Body `initial_success`／`exhausted_alert`／`correction`；逐欄 UTF-8 上限；總量 65,536 bytes 上限；超限拒絕不截斷；未知欄位忽略；missing 與 `null` 分離；未知 `event_type`／未支援 `schema_version` 拒絕；payload 持久化後不可變、Retry 重用同一字串；JSON／`TEXT`；不新增 hash／簽章）。**C-4 解除**（§12.1、§12.4），`OUT-11` 在 M7.0 規格本文仍為 `OPEN`，本文件未改寫規格。§3 的 `payload` 內部結構 `[OPEN]` 改指向 §3.2。§13 新增 Payload Schema `IMPLEMENTED`（MVP）並將 Full P-5 Design 的未決項由 C-4～C-8 收斂為 C-5～C-8。§14 加入唯一例外條款（僅 §3.2）。H1 標題由誤植的 `（Rev 2）` 更正為 `（Rev 4）`。實作：`src/modules/outbox/payload.{constants,types,errors,serializer}.ts`；測試：單元 32 項、整合 6 項。文件整體狀態維持 `PROPOSED — NOT APPROVED`。 |
