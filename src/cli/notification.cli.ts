@@ -69,6 +69,19 @@ export interface NotificationCliDependencies {
  * article reports `skipped` instead of sending it again, and a run whose send
  * failed leaves no row behind and retries next time.
  *
+ * ## Two failures that look alike and are not
+ *
+ * A send that Telegram refused and a send that succeeded but could not be
+ * recorded are different facts, and the run reports them apart:
+ *
+ * - the send failed — nothing was delivered, nothing was written, the next run
+ *   retries the same article (`reason` is the provider's own reason);
+ * - the send succeeded but the record failed — the message exists in the chat and
+ *   no row says so (`reason: 'delivery-not-recorded'`, with the `messageId` so an
+ *   operator can reconcile). The run does not retry the write and does not claim
+ *   success: the next run will announce the article again, which is the duplicate
+ *   this ledger exists to prevent, and pretending otherwise would hide it.
+ *
  * An empty database is a success, matching the other one-shot CLIs: there is
  * nothing to publish is the steady state, not a failure. Every other outcome —
  * unreadable database, missing credential, Telegram refusal — exits `1` with the
@@ -121,11 +134,33 @@ export async function runNotificationCli(
 
     // Written after the send, never before: a row is the record of a message
     // Telegram accepted, so a failed send cannot leave one behind.
-    await deliveries.recordSent({
-      articleId: article.articleId,
-      messageId,
-      createdAt: new Date().toISOString(),
-    });
+    try {
+      await deliveries.recordSent({
+        articleId: article.articleId,
+        messageId,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      // The message is already in the chat. Reporting this as a failed send would
+      // invite a retry that duplicates it, and reporting it as `sent` would claim
+      // a record that does not exist. The message id is the only useful fact.
+      const message = error instanceof Error ? error.message : String(error);
+      writeStderr(
+        JSON.stringify({
+          status: 'failed',
+          reason: 'delivery-not-recorded',
+          articleId: article.articleId,
+          messageId,
+          error: message,
+        }),
+      );
+      log.error('Notification was sent but its delivery record could not be written', {
+        articleId: article.articleId,
+        messageId,
+        error: message,
+      });
+      return EXIT_FAILURE;
+    }
 
     writeStdout(JSON.stringify({ status: 'sent', articleId: article.articleId, messageId }));
     log.info('Notification run published one article', {

@@ -389,6 +389,117 @@ describe('notify CLI — delivery deduplication', () => {
   });
 });
 
+describe('notify CLI — a delivered message whose record could not be written', () => {
+  /** Fails only the write: the table still reads, so the failure is the one under test. */
+  function failWrites(path: string): void {
+    withDatabase(path, (database) => {
+      database.query((connection) =>
+        connection.all(
+          `CREATE TRIGGER refuse_delivery_write
+             BEFORE INSERT ON notification_delivery
+           BEGIN
+             SELECT RAISE(ABORT, 'disk I/O error');
+           END`,
+        ),
+      );
+    });
+  }
+
+  function allowWrites(path: string): void {
+    withDatabase(path, (database) => {
+      database.query((connection) => connection.all('DROP TRIGGER refuse_delivery_write'));
+    });
+  }
+
+  it('reports delivery-not-recorded with the message id, never sent or skipped', async () => {
+    const path = temporaryDatabasePath();
+    withDatabase(path, (database) => {
+      seed(database, [{ id: 'a1', order: 1 }]);
+      derive(database, 'a1', '2026-02-01T00:00:00.000Z');
+    });
+    failWrites(path);
+    const { calls, transport } = fakeTransport();
+
+    const result = await run({ transport, openDatabase: () => openDatabase({ path }) });
+
+    expect(result.code).toBe(EXIT_FAILURE);
+    // The message really was delivered, so it must not be reported as a send failure.
+    expect(result.stdout).toEqual([]);
+    expect(JSON.parse(result.stderr[0] ?? '')).toEqual({
+      status: 'failed',
+      reason: 'delivery-not-recorded',
+      articleId: 'a1',
+      messageId: 777,
+      error: 'disk I/O error',
+    });
+    expect(calls).toHaveLength(1);
+    // No row was invented, and no row was overwritten with a claim of success.
+    expect(withDatabase(path, deliveries)).toEqual([]);
+  });
+
+  it('leaves the duplicate risk visible: the next run announces the article again', async () => {
+    const path = temporaryDatabasePath();
+    withDatabase(path, (database) => {
+      seed(database, [{ id: 'a1', order: 1 }]);
+      derive(database, 'a1', '2026-02-01T00:00:00.000Z');
+    });
+    failWrites(path);
+
+    expect(
+      (
+        await run({
+          transport: fakeTransport().transport,
+          openDatabase: () => openDatabase({ path }),
+        })
+      ).code,
+    ).toBe(EXIT_FAILURE);
+
+    allowWrites(path);
+    const { calls, transport } = fakeTransport();
+    const second = await run({ transport, openDatabase: () => openDatabase({ path }) });
+
+    expect(second.code).toBe(EXIT_SUCCESS);
+    expect(JSON.parse(second.stdout[0] ?? '')).toMatchObject({ status: 'sent', articleId: 'a1' });
+    expect(calls).toHaveLength(1);
+    expect(withDatabase(path, deliveries)).toHaveLength(1);
+  });
+});
+
+describe('notify CLI — a send Telegram refused writes nothing', () => {
+  it('reports the provider reason, not a record failure, and stays retryable', async () => {
+    const path = temporaryDatabasePath();
+    withDatabase(path, (database) => {
+      seed(database, [{ id: 'a1', order: 1 }]);
+      derive(database, 'a1', '2026-02-01T00:00:00.000Z');
+    });
+    const failing = fakeTransport({
+      status: 200,
+      body: JSON.stringify({ ok: false, description: 'chat not found' }),
+    });
+
+    const result = await run({
+      transport: failing.transport,
+      openDatabase: () => openDatabase({ path }),
+    });
+
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stdout).toEqual([]);
+    // Distinguishable from `delivery-not-recorded`: this failure delivered nothing.
+    expect(JSON.parse(result.stderr[0] ?? '')).toMatchObject({
+      status: 'failed',
+      reason: 'api_rejected',
+    });
+    expect(withDatabase(path, deliveries)).toEqual([]);
+
+    const retry = await run({
+      transport: fakeTransport().transport,
+      openDatabase: () => openDatabase({ path }),
+    });
+    expect(retry.code).toBe(EXIT_SUCCESS);
+    expect(JSON.parse(retry.stdout[0] ?? '')).toMatchObject({ status: 'sent', messageId: 777 });
+  });
+});
+
 describe('notify CLI — nothing to publish', () => {
   it('exits 0 with no-article when no derivation exists', async () => {
     const database = openDatabase({ path: ':memory:' });
