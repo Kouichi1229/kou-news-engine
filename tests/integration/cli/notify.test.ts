@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { EXIT_FAILURE, EXIT_SUCCESS } from '../../../src/cli/exit-codes.js';
 import { runNotificationCli } from '../../../src/cli/notification.cli.js';
@@ -63,6 +67,49 @@ function derive(database: SqliteDatabase, articleId: string, updatedAt: string):
   });
 }
 
+function deliveries(database: SqliteDatabase): Array<{
+  article_id: string;
+  message_id: number;
+  status: string;
+  created_at: string;
+}> {
+  return database.query((connection) =>
+    connection.all(
+      'SELECT article_id, message_id, status, created_at FROM notification_delivery ORDER BY article_id',
+    ),
+  ) as Array<{ article_id: string; message_id: number; status: string; created_at: string }>;
+}
+
+/**
+ * A file-backed database, one directory per test.
+ *
+ * Deduplication has to survive a process boundary, and each CLI run opens and
+ * closes its own handle — so the only honest fixture is a file the next run can
+ * open again.
+ */
+const directories: string[] = [];
+
+afterEach(() => {
+  for (const directory of directories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function temporaryDatabasePath(): string {
+  const directory = mkdtempSync(join(tmpdir(), 'kou-notify-'));
+  directories.push(directory);
+  return join(directory, 'test.db');
+}
+
+function withDatabase<T>(path: string, read: (database: SqliteDatabase) => T): T {
+  const database = openDatabase({ path });
+  try {
+    return read(database);
+  } finally {
+    database.close();
+  }
+}
+
 interface CapturedRun {
   code: number;
   stdout: string[];
@@ -78,12 +125,14 @@ async function run(
     openDatabase?: () => SqliteDatabase;
   } = {},
 ): Promise<CapturedRun> {
-  const database = options.database ?? openDatabase({ path: ':memory:' });
+  const open =
+    options.openDatabase ??
+    ((): SqliteDatabase => options.database ?? openDatabase({ path: ':memory:' }));
   const stdout: string[] = [];
   const stderr: string[] = [];
 
   const code = await runNotificationCli({
-    openDatabase: options.openDatabase ?? (() => database),
+    openDatabase: open,
     botToken: 'botToken' in options ? options.botToken : TOKEN,
     chatId: 'chatId' in options ? options.chatId : CHAT_ID,
     transport: options.transport ?? fakeTransport().transport,
@@ -216,6 +265,127 @@ describe('notify CLI — failures exit non-zero with a reason', () => {
       reason: 'unexpected-error',
       error: 'SQLITE_CANTOPEN',
     });
+  });
+});
+
+describe('notify CLI — delivery deduplication', () => {
+  function seeded(): string {
+    const path = temporaryDatabasePath();
+    withDatabase(path, (database) => {
+      seed(database, [{ id: 'a1', order: 1 }]);
+      derive(database, 'a1', '2026-02-01T00:00:00.000Z');
+    });
+    return path;
+  }
+
+  function open(path: string): () => SqliteDatabase {
+    return () => openDatabase({ path });
+  }
+
+  it('records a successful send exactly once', async () => {
+    const path = seeded();
+    const { transport } = fakeTransport();
+
+    const first = await run({ transport, openDatabase: open(path) });
+
+    expect(first.code).toBe(EXIT_SUCCESS);
+    expect(JSON.parse(first.stdout[0] ?? '')).toMatchObject({ status: 'sent', articleId: 'a1' });
+    expect(withDatabase(path, deliveries)).toEqual([
+      {
+        article_id: 'a1',
+        message_id: 777,
+        status: 'sent',
+        created_at: expect.any(String) as unknown as string,
+      },
+    ]);
+  });
+
+  it('skips an article it already published', async () => {
+    const path = seeded();
+    const { calls, transport } = fakeTransport();
+
+    const first = await run({ transport, openDatabase: open(path) });
+    const second = await run({ transport, openDatabase: open(path) });
+
+    expect(JSON.parse(first.stdout[0] ?? '')).toMatchObject({ status: 'sent' });
+    expect(second.code).toBe(EXIT_SUCCESS);
+    expect(JSON.parse(second.stdout[0] ?? '')).toEqual({
+      status: 'skipped',
+      articleId: 'a1',
+      messageId: 777,
+    });
+    expect(second.stderr).toEqual([]);
+    // One send in total: the second run decided before touching the transport.
+    expect(calls).toHaveLength(1);
+    expect(withDatabase(path, deliveries)).toHaveLength(1);
+  });
+
+  it('writes nothing when the send fails, so the next run retries and succeeds', async () => {
+    const path = seeded();
+    const failing = fakeTransport({
+      status: 200,
+      body: JSON.stringify({ ok: false, description: 'chat not found' }),
+    });
+
+    const first = await run({ transport: failing.transport, openDatabase: open(path) });
+
+    expect(first.code).toBe(EXIT_FAILURE);
+    expect(withDatabase(path, deliveries)).toEqual([]);
+
+    const succeeding = fakeTransport();
+    const second = await run({ transport: succeeding.transport, openDatabase: open(path) });
+
+    expect(second.code).toBe(EXIT_SUCCESS);
+    expect(JSON.parse(second.stdout[0] ?? '')).toMatchObject({
+      status: 'sent',
+      articleId: 'a1',
+      messageId: 777,
+    });
+    expect(succeeding.calls).toHaveLength(1);
+    expect(withDatabase(path, deliveries)).toHaveLength(1);
+  });
+
+  it('retries after a transport failure too', async () => {
+    const path = seeded();
+    const broken: TelegramTransport = {
+      async send() {
+        throw new Error('ECONNRESET');
+      },
+    };
+
+    expect((await run({ transport: broken, openDatabase: open(path) })).code).toBe(EXIT_FAILURE);
+    expect(withDatabase(path, deliveries)).toEqual([]);
+
+    expect(
+      (await run({ transport: fakeTransport().transport, openDatabase: open(path) })).code,
+    ).toBe(EXIT_SUCCESS);
+    expect(withDatabase(path, deliveries)).toHaveLength(1);
+  });
+
+  it('does not skip an article whose only recorded row is a failure', async () => {
+    const path = seeded();
+    withDatabase(path, (database) => {
+      database.query((connection) =>
+        connection.all(
+          `INSERT INTO notification_delivery (article_id, message_id, status, created_at)
+           VALUES ('a1', 5, 'failed', '2026-02-02T00:00:00.000Z')`,
+        ),
+      );
+    });
+    const { calls, transport } = fakeTransport();
+
+    const result = await run({ transport, openDatabase: open(path) });
+
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({ status: 'sent', messageId: 777 });
+    expect(calls).toHaveLength(1);
+    expect(withDatabase(path, deliveries)).toEqual([
+      {
+        article_id: 'a1',
+        message_id: 777,
+        status: 'sent',
+        created_at: expect.any(String) as unknown as string,
+      },
+    ]);
   });
 });
 

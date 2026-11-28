@@ -1,6 +1,7 @@
 import { logger as defaultLogger } from '../core/logger.js';
 import { openDatabase, type SqliteDatabase } from '../core/persistence/sqlite.js';
 import type { TelegramArticleInput } from '../modules/notification/telegram.formatter.js';
+import { SqliteNotificationDeliveryRepository } from '../modules/notification/repository/sqlite-notification-delivery.repository.js';
 import {
   createTelegramProvider,
   TelegramSendError,
@@ -62,9 +63,11 @@ export interface NotificationCliDependencies {
 /**
  * Publishes the newest derived article, one message, one outcome.
  *
- * No record of the send is kept, no batch is walked and nothing is scheduled:
- * this process sends at most one message and exits. Running it twice sends the
- * same article twice, which is the caller's business to avoid.
+ * No batch is walked and nothing is scheduled: this process handles at most one
+ * article and exits. Delivery is deduplicated by `notification_delivery`, written
+ * only after Telegram confirms the send — so a run over an already-announced
+ * article reports `skipped` instead of sending it again, and a run whose send
+ * failed leaves no row behind and retries next time.
  *
  * An empty database is a success, matching the other one-shot CLIs: there is
  * nothing to publish is the steady state, not a failure. Every other outcome —
@@ -92,11 +95,37 @@ export async function runNotificationCli(
       return EXIT_SUCCESS;
     }
 
+    const deliveries = new SqliteNotificationDeliveryRepository(database);
+    const alreadySent = await deliveries.findSuccessful(article.articleId);
+
+    if (alreadySent !== undefined) {
+      writeStdout(
+        JSON.stringify({
+          status: 'skipped',
+          articleId: article.articleId,
+          messageId: alreadySent.messageId,
+        }),
+      );
+      log.info('Notification run skipped an already-published article', {
+        articleId: article.articleId,
+        messageId: alreadySent.messageId,
+      });
+      return EXIT_SUCCESS;
+    }
+
     const provider = createTelegramProvider(
       { botToken: dependencies.botToken, chatId: dependencies.chatId },
       dependencies.transport,
     );
     const { messageId } = await provider.send(article);
+
+    // Written after the send, never before: a row is the record of a message
+    // Telegram accepted, so a failed send cannot leave one behind.
+    await deliveries.recordSent({
+      articleId: article.articleId,
+      messageId,
+      createdAt: new Date().toISOString(),
+    });
 
     writeStdout(JSON.stringify({ status: 'sent', articleId: article.articleId, messageId }));
     log.info('Notification run published one article', {

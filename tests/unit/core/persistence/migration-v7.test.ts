@@ -81,12 +81,10 @@ const storedBody: Row = [
 ];
 
 describe('v7 article_contents body retention', () => {
-  it('is the newest migration and is recorded once applied', () => {
+  it('is registered and recorded once applied', () => {
     const handle = openMigrated();
 
-    expect(Math.max(...MIGRATIONS.map((migration) => migration.version))).toBe(
-      ARTICLE_CONTENTS_BODY_RETENTION_MIGRATION.version,
-    );
+    expect(MIGRATIONS).toContain(ARTICLE_CONTENTS_BODY_RETENTION_MIGRATION);
 
     const applied = handle.query((connection) =>
       connection.all('SELECT version, name FROM schema_migrations WHERE version = 7'),

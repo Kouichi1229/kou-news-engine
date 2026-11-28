@@ -356,6 +356,7 @@ describe('runMigrations — first run', () => {
       'article_derived',
       'article_sources',
       'articles',
+      'notification_delivery',
       'processing_job',
       'processing_lifecycle',
       'schema_migrations',

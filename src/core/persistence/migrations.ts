@@ -553,6 +553,49 @@ export const ARTICLE_CONTENTS_BODY_RETENTION_MIGRATION: Migration = {
   ],
 };
 
+/**
+ * v8: one row per article announced to Telegram.
+ *
+ * ## Why this table exists
+ *
+ * The notify CLI sends the newest derived article. Without a record of what was
+ * already sent, running it twice announces the same article twice, and there is
+ * no way to tell a repeat from a first attempt.
+ *
+ * ## What it deliberately is not
+ *
+ * Not a delivery queue and not a state machine: one row per article, written only
+ * after a successful send. A failed send writes nothing at all, so the next run
+ * sees the article as unsent and retries it — "no row" is the retryable state,
+ * which is why no intermediate status has to exist.
+ *
+ * `status` admits both values rather than only `sent` so a later change can record
+ * a failure without a table rebuild; today only `sent` is written, and the skip
+ * decision reads `status = 'sent'` explicitly rather than trusting the row's
+ * existence.
+ *
+ * The article reference cascades, like `article_contents`: once the article is
+ * gone there is nothing left to announce, and an orphan row would silently block a
+ * re-ingested id from ever being announced.
+ */
+export const NOTIFICATION_DELIVERY_MIGRATION: Migration = {
+  version: 8,
+  name: 'notification_delivery',
+  statements: [
+    `CREATE TABLE notification_delivery (
+      article_id TEXT    PRIMARY KEY NOT NULL
+                         REFERENCES articles (id) ON DELETE CASCADE,
+      message_id INTEGER NOT NULL,
+      status     TEXT    NOT NULL CHECK (status IN ('sent','failed')),
+      created_at TEXT    NOT NULL,
+
+      CHECK (typeof(message_id) = 'integer'),
+      CHECK (length(created_at) > 0),
+      CHECK (message_id > 0)
+    )`,
+  ],
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   INITIAL_MIGRATION,
   INSERTION_ORDER_AND_PRIMARY_SOURCE_MIGRATION,
@@ -561,6 +604,7 @@ export const MIGRATIONS: readonly Migration[] = [
   PROCESSING_STATE_MIGRATION,
   ARTICLE_DERIVED_MIGRATION,
   ARTICLE_CONTENTS_BODY_RETENTION_MIGRATION,
+  NOTIFICATION_DELIVERY_MIGRATION,
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {
