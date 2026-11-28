@@ -3,7 +3,7 @@
  *
  * Run it as:
  *
- *   npm run notify -- --execute
+ *   npm run notify -- --execute [--category <category>]
  *
  * A separate entry point on purpose: the HTTP server never publishes, and this
  * process never starts a server. Sending is triggered by an external scheduler,
@@ -12,10 +12,13 @@
  *
  * ## Ordering
  *
- * The command line is parsed before anything else. Only `--execute` reaches
- * `env.ts` (which validates `process.env` on evaluation) and the database.
+ * The command line is settled before anything else, `--category` included. Only a
+ * complete, valid command line reaches `env.ts` (which validates `process.env` on
+ * evaluation) and the database, so a mistyped cron line fails without needing
+ * configuration and without creating a database file.
  */
 import { parseCliArgs } from './args.js';
+import { parseCategoryArgument } from './category-argument.js';
 import { EXIT_USAGE } from './exit-codes.js';
 import { usageFor } from './usage.js';
 
@@ -31,50 +34,16 @@ const USAGE = usageFor(
   },
 );
 
-interface CategoryArgument {
-  /** The remaining arguments, with the flag and its value removed. */
-  readonly rest: readonly string[];
-  /** Absent when `--category` was not given: the unfiltered run. */
-  readonly category?: string;
-}
-
-/**
- * Lifts `--category <value>` out of the argument vector.
- *
- * Done here rather than in `parseCliArgs`, which rejects every flag it does not
- * know and deliberately imports nothing: the category's vocabulary lives in the
- * derivation module, which has to stay out of a parser that runs before `env.ts`
- * is evaluated. Returns a message instead of a result when the flag is malformed,
- * so the caller can print the usage and exit 2.
- */
-function takeCategory(argv: readonly string[]): CategoryArgument | string {
-  const at = argv.indexOf('--category');
-  if (at === -1) {
-    return { rest: argv };
-  }
-
-  const value = argv[at + 1];
-  if (value === undefined || value.startsWith('--')) {
-    return 'The --category flag needs a value.';
-  }
-
-  const rest = argv.filter((_, index) => index !== at && index !== at + 1);
-  if (rest.includes('--category')) {
-    return 'The --category flag may be given only once.';
-  }
-  return { rest, category: value };
-}
-
 async function main(): Promise<void> {
-  const taken = takeCategory(process.argv.slice(2));
+  const taken = await parseCategoryArgument(process.argv.slice(2));
 
-  if (typeof taken === 'string') {
-    process.stderr.write(`${taken}\n\n${USAGE}`);
+  if (taken.kind === 'error') {
+    process.stderr.write(`${taken.message}\n\n${USAGE}`);
     process.exitCode = EXIT_USAGE;
     return;
   }
 
-  const parsed = parseCliArgs(taken.rest);
+  const parsed = parseCliArgs(taken.argument.rest);
 
   if (parsed.mode === 'usage-error') {
     process.stderr.write(`${parsed.message}\n\n${USAGE}`);
@@ -94,19 +63,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  // The category is settled before `env.ts` is evaluated, for the same reason the
-  // arguments are: a run rejected for a bad flag must not depend on configuration
-  // the operator has not supplied yet, and must not open a database either.
-  const { DERIVATION_CATEGORIES } = await import('../modules/derivation/derivation.service.js');
-  const category = taken.category;
-  if (category !== undefined && !(DERIVATION_CATEGORIES as readonly string[]).includes(category)) {
-    process.stderr.write(
-      `Unknown category "${category}". Expected one of: ${DERIVATION_CATEGORIES.join(', ')}.\n\n${USAGE}`,
-    );
-    process.exitCode = EXIT_USAGE;
-    return;
-  }
-
   // Imported here rather than at module scope. `env.ts` validates `process.env`
   // as soon as it is evaluated, so a static import would throw before this
   // file's `main().catch` exists — leaving the failure to Node's uncaught
@@ -119,9 +75,7 @@ async function main(): Promise<void> {
   process.exitCode = await runNotificationCli({
     botToken: env.TELEGRAM_BOT_TOKEN,
     chatId: env.TELEGRAM_CHAT_ID,
-    ...(category === undefined
-      ? {}
-      : { category: category as (typeof DERIVATION_CATEGORIES)[number] }),
+    ...(taken.argument.category === undefined ? {} : { category: taken.argument.category }),
   });
 }
 

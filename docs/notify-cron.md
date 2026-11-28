@@ -16,9 +16,11 @@ or, against a built image:
 npm run notify:scheduled:prod
 ```
 
-The entry takes **no arguments**. Any argument except `--help` exits `2` without
-opening the database, so a mistyped cron line fails loudly instead of doing
-something else. `--help` prints the usage and exits `0`.
+The entry takes **no required arguments**. The only flag it accepts besides
+`--help` is the optional `--category <category>`. Any other argument, and any
+unknown category, exits `2` without opening the database, so a mistyped cron line
+fails loudly instead of doing something else. `--help` prints the usage and exits
+`0`.
 
 `notify:scheduled` delegates to the same publish flow as `npm run notify --
 --execute`: same formatter, same `article_derived` selection, same
@@ -27,7 +29,10 @@ that the flags are settled for you.
 
 ## Publishing one category
 
+Both notification commands accept the same optional flag:
+
 ```bash
+npm run notify:scheduled -- --category 財經
 npm run notify -- --execute --category 財經
 ```
 
@@ -42,9 +47,21 @@ a filtered run never picks it up; an unfiltered run still can.
 
 An unknown label — including a misspelling, a value with stray whitespace, or the
 flag given twice — exits `2` with the full list in the message and opens no
-database, so a bad cron line fails loudly. `notify:scheduled` does **not** pass
-`--category`; use `npm run notify -- --execute --category <category>` when a
-schedule needs a single category.
+database, so a bad cron line fails loudly. The `--category=<value>` spelling is not
+recognised and is rejected as an unknown argument.
+
+`notify:scheduled` only parses the flag and forwards it. It opens no database of
+its own, and it adds no publishing logic: the article selection, the formatter, the
+`notification_delivery` deduplication and the exit codes all come from the same
+flow `npm run notify -- --execute` uses.
+
+One deployment can therefore run several schedules against one database, each with
+its own category:
+
+```cron
+# Every 15 minutes, financial news only.
+*/15 * * * * cd /srv/kou-news-engine && /usr/bin/npm run notify:scheduled -- --category 財經 >> /var/log/kou-notify-finance.log 2>&1
+```
 
 ## Environment
 

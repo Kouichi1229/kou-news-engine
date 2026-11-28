@@ -1,6 +1,7 @@
 import type { Env } from '../config/env.js';
 import { logger as defaultLogger } from '../core/logger.js';
 import { openDatabase, type SqliteDatabase } from '../core/persistence/sqlite.js';
+import type { DerivationCategory } from '../modules/derivation/derivation.service.js';
 import type { TelegramTransport } from '../modules/notification/telegram.provider.js';
 
 import { runNotificationCli } from './notification.cli.js';
@@ -29,6 +30,14 @@ export function scheduledConfigFromEnv(env: Env): ScheduledNotificationConfig {
 
 export interface ScheduledNotificationDependencies {
   readonly config: ScheduledNotificationConfig;
+  /**
+   * Publishes only the newest article of this category.
+   *
+   * Comes from the command line, not from the environment: one deployment may run
+   * several schedules, one per category, against the same database. Absent means no
+   * filter, which is the unfiltered run this entry has always performed.
+   */
+  readonly category?: DerivationCategory | undefined;
   /** Defaults to the real HTTP transport. A fake here is how tests avoid the network. */
   transport?: TelegramTransport | undefined;
   /** Defaults to `openDatabase({ path: config.databasePath })`. */
@@ -50,6 +59,10 @@ export interface ScheduledNotificationDependencies {
  *
  * There is no loop, no timer and no in-process scheduler. One invocation, one
  * article, then exit — which is what lets cron decide the frequency.
+ *
+ * `category` is the one thing this entry can be told on the command line. It is
+ * forwarded, not interpreted: the repository filter and the deduplication that
+ * decide what is actually published stay in the flow above.
  */
 export async function runScheduledNotification(
   dependencies: ScheduledNotificationDependencies,
@@ -64,6 +77,7 @@ export async function runScheduledNotification(
       ((): SqliteDatabase => openDatabase({ path: config.databasePath })),
     botToken: config.botToken,
     chatId: config.chatId,
+    ...(dependencies.category === undefined ? {} : { category: dependencies.category }),
     ...(dependencies.transport === undefined ? {} : { transport: dependencies.transport }),
     ...(dependencies.logger === undefined ? {} : { logger: dependencies.logger }),
     ...(dependencies.writeStdout === undefined ? {} : { writeStdout: dependencies.writeStdout }),
