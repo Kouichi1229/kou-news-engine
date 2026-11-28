@@ -41,9 +41,16 @@ export class DerivationError extends Error {
   }
 }
 
+/**
+ * The shape one completion must have before anything is stored.
+ *
+ * `trim()` runs before `min(1)`, so a field holding only whitespace fails the
+ * check instead of being stored as an empty string, and the title cap applies to
+ * the trimmed text rather than to padding the model may add.
+ */
 const outputSchema = z.object({
-  title_zh: z.string().min(1).max(DERIVATION_LIMITS.maxTitleChars),
-  summary_zh: z.string().min(1),
+  title_zh: z.string().trim().min(1).max(DERIVATION_LIMITS.maxTitleChars),
+  summary_zh: z.string().trim().min(1),
 });
 
 const SYSTEM_INSTRUCTION =
@@ -81,8 +88,10 @@ function buildPrompt(title: string, text: string): string {
  * Parses one completion into the two stored strings.
  *
  * Tolerates a wrapping Markdown code fence because models add one even when told
- * not to; it tolerates nothing else. Any other deviation is a rejection, so a
- * malformed answer is never written as if it were a summary.
+ * not to; it tolerates nothing else. Both fields are trimmed before they are
+ * checked, so a blank title or a blank summary is a rejection rather than a row
+ * holding `''`. Any other deviation is a rejection too, so a malformed answer is
+ * never written as if it were a summary.
  */
 export function parseDerivationOutput(raw: string): { titleZh: string; summaryZh: string } {
   const unfenced = raw
@@ -108,8 +117,8 @@ export function parseDerivationOutput(raw: string): { titleZh: string; summaryZh
     );
   }
 
-  const titleZh = result.data.title_zh.trim();
-  const summaryZh = result.data.summary_zh.trim();
+  const titleZh = result.data.title_zh;
+  const summaryZh = result.data.summary_zh;
   const length = charCount(summaryZh);
   if (length < DERIVATION_LIMITS.minSummaryChars || length > DERIVATION_LIMITS.maxSummaryChars) {
     throw new DerivationError(

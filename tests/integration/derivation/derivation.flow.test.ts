@@ -213,6 +213,57 @@ describe('ArticleDerivationService — output contract', () => {
     expect(derivedRows()).toEqual([]);
   });
 
+  it('writes no row when the model returns a blank title', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [{ kind: 'success', text: modelReply(120, '   \n ') }],
+    });
+
+    await expect(derivation(provider).derive('a1', BODY)).rejects.toMatchObject({
+      reason: 'invalid-output',
+    });
+    expect(derivedRows()).toEqual([]);
+  });
+
+  it('writes no row when the model returns a blank summary', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [
+        { kind: 'success', text: JSON.stringify({ title_zh: '標題', summary_zh: '   ' }) },
+      ],
+    });
+
+    await expect(derivation(provider).derive('a1', BODY)).rejects.toMatchObject({
+      reason: 'invalid-output',
+    });
+    expect(derivedRows()).toEqual([]);
+  });
+
+  it('writes no row when the model omits the summary field', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [{ kind: 'success', text: JSON.stringify({ title_zh: '標題' }) }],
+    });
+
+    await expect(derivation(provider).derive('a1', BODY)).rejects.toMatchObject({
+      reason: 'invalid-output',
+    });
+    expect(derivedRows()).toEqual([]);
+  });
+
+  it('stores the trimmed title and summary, not the padded ones', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [{ kind: 'success', text: modelReply(120, '  人工智慧監管新規  ') }],
+    });
+
+    await derivation(provider).derive('a1', BODY);
+
+    const rows = derivedRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.['title_zh']).toBe('人工智慧監管新規');
+  });
+
   it('accepts both ends of the range', async () => {
     insertArticle('a1');
     insertArticle('a2', 2);
