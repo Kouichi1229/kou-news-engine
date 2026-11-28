@@ -29,7 +29,7 @@ import { LlmError, LlmTimeoutError } from '../llm.errors.js';
 export const GEMINI_ORIGIN = 'https://generativelanguage.googleapis.com';
 
 /** The adopted endpoint path (Section 11.6.4). */
-export const GEMINI_INTERACTIONS_PATH = '/v1/interactions';
+export const GEMINI_INTERACTIONS_PATH = '/v1beta/interactions';
 
 /** Success body ceiling (Section 11.6.8). Provisional until validated. */
 export const MAX_SUCCESS_BODY_BYTES = 1024 * 1024;

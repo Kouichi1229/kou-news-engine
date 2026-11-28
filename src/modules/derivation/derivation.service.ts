@@ -25,7 +25,6 @@ export const DERIVATION_LIMITS = {
    */
   maxArticleChars: 20_000,
   maxOutputTokens: 1_024,
-  temperature: 0.2,
 } as const;
 
 export type DerivationFailureReason =
@@ -154,7 +153,6 @@ export class ArticleDerivationService {
       prompt: buildPrompt(title, text),
       systemInstruction: SYSTEM_INSTRUCTION,
       maxOutputTokens: this.deps.maxOutputTokens ?? DERIVATION_LIMITS.maxOutputTokens,
-      temperature: DERIVATION_LIMITS.temperature,
     });
 
     const { titleZh, summaryZh } = parseDerivationOutput(response.text);

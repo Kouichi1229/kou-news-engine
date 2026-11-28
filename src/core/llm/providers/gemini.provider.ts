@@ -31,7 +31,7 @@ export interface GeminiProviderDeps {
 }
 
 const GEMINI_ORIGIN = 'https://generativelanguage.googleapis.com';
-const GEMINI_INTERACTIONS_PATH = '/v1/interactions';
+const GEMINI_INTERACTIONS_PATH = '/v1beta/interactions';
 const GEMINI_INTERACTIONS_URL = `${GEMINI_ORIGIN}${GEMINI_INTERACTIONS_PATH}`;
 
 /**
@@ -107,6 +107,29 @@ function extractErrorCode(body: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Reads the failure code of a completed call that reports `status: "failed"`.
+ *
+ * The Interaction resource carries failures in `errors` (an array), not in the
+ * `error` object used by HTTP-level failures. Only the code is read; the vendor
+ * message can quote request content and is never surfaced (Section 11.6.6).
+ */
+function interactionFailureCode(interaction: Record<string, unknown>): string | undefined {
+  const errors = interaction['errors'];
+  if (Array.isArray(errors)) {
+    for (const entry of errors) {
+      if (isRecord(entry) && typeof entry['code'] === 'string') {
+        return entry['code'];
+      }
+    }
+  }
+  const error = interaction['error'];
+  if (isRecord(error) && typeof error['code'] === 'string') {
+    return error['code'];
+  }
+  return undefined;
 }
 
 /**
@@ -238,8 +261,8 @@ export class GeminiProvider implements LlmProvider {
     // A failed generation is an error, never a response with fabricated text
     // (Section 11.1.3). The documented code is named; the vendor message is not.
     if (interactionStatus === 'failed') {
-      const code = isRecord(parsed['error']) ? parsed['error']['code'] : undefined;
-      const detail = typeof code === 'string' ? ` (${code})` : '';
+      const code = interactionFailureCode(parsed);
+      const detail = code === undefined ? '' : ` (${code})`;
       throw new LlmError('invalid_response', `Gemini interaction failed${detail}`, {
         providerId: 'gemini',
         statusCode: status,

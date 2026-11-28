@@ -116,7 +116,7 @@ describe('M4.2 assertion 2 — complete() issues exactly one request', () => {
     const transport = recordingTransport();
     await provider(transport).complete(request());
     expect(transport.calls[0]?.url).toBe(
-      'https://generativelanguage.googleapis.com/v1/interactions',
+      'https://generativelanguage.googleapis.com/v1beta/interactions',
     );
   });
 
@@ -266,6 +266,24 @@ describe('M4.2 assertion 7 — three-valued truncation from status', () => {
   it('treats failed as an error rather than a response', async () => {
     const transport = recordingTransport(() => ok(completedInteraction('x', 'failed')));
     await expect(provider(transport).complete(request())).rejects.toBeInstanceOf(LlmError);
+  });
+
+  it('names the documented errors[].code and never the vendor message', async () => {
+    const transport = recordingTransport(() =>
+      ok({
+        id: 'interaction-1',
+        status: 'failed',
+        errors: [{ code: 'safety', message: 'blocked: this message quotes request text' }],
+      }),
+    );
+
+    const error: unknown = await provider(transport)
+      .complete(request())
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(LlmError);
+    expect((error as LlmError).message).toBe('Gemini interaction failed (safety)');
+    expect((error as LlmError).message).not.toContain('request text');
   });
 
   it('treats requires_action as invalid_response', async () => {

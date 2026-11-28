@@ -169,7 +169,7 @@ vi.mock('node:https', async (importOriginal) => {
 });
 
 const API_KEY = 'test-key-not-real';
-const URL_UNDER_TEST = `${GEMINI_ORIGIN}/v1/interactions`;
+const URL_UNDER_TEST = `${GEMINI_ORIGIN}/v1beta/interactions`;
 
 function newTransport(timeoutMs?: number) {
   return createGeminiTransport(
@@ -212,7 +212,7 @@ describe('Gemini transport — request construction', () => {
     const [request] = recorded;
     expect(request?.method).toBe('POST');
     expect(request?.hostname).toBe('generativelanguage.googleapis.com');
-    expect(request?.path).toBe('/v1/interactions');
+    expect(request?.path).toBe('/v1beta/interactions');
     expect(request?.headers?.['x-goog-api-key']).toBe(API_KEY);
     expect(request?.body).toBe('{"store":false}');
   });
