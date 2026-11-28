@@ -35,6 +35,8 @@ describe('loadEnv', () => {
       LLM_TIMEOUT_MS: 30000,
       LLM_MAX_OUTPUT_TOKENS: 2048,
       GEMINI_API_KEY: undefined,
+      TELEGRAM_BOT_TOKEN: undefined,
+      TELEGRAM_CHAT_ID: undefined,
     });
   });
 
@@ -54,6 +56,8 @@ describe('loadEnv', () => {
       LLM_TIMEOUT_MS: 30000,
       LLM_MAX_OUTPUT_TOKENS: 2048,
       GEMINI_API_KEY: undefined,
+      TELEGRAM_BOT_TOKEN: undefined,
+      TELEGRAM_CHAT_ID: undefined,
     });
   });
 

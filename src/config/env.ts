@@ -52,6 +52,14 @@ const envSchema = z.object({
   // Deliberately no `superRefine` and no cross-field rule here — the schema
   // cannot know whether a provider will ever be constructed.
   GEMINI_API_KEY: z.string().optional(),
+
+  // Telegram delivery settings. Optional for the same reason as the LLM key:
+  // nothing sends a message unless a provider is built, and the provider refuses
+  // to send without them. Declared here so environment access stays in this
+  // module; a blank value is treated as "not set" by the provider rather than as
+  // a boot failure.
+  TELEGRAM_BOT_TOKEN: z.string().optional(),
+  TELEGRAM_CHAT_ID: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
