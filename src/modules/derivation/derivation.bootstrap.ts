@@ -43,7 +43,7 @@ export interface DerivationHookDeps {
 export async function createDerivationHook(
   deps: DerivationHookDeps,
 ): Promise<{ deriveArticle?: (articleId: string, text: string) => Promise<void> }> {
-  const provider = deps.provider ?? (await buildProviderFromEnv(deps.log));
+  const provider = deps.provider ?? (await buildDerivationProviderFromEnv(deps.log));
   if (provider === undefined) {
     return {};
   }
@@ -81,8 +81,15 @@ export async function createDerivationHook(
  *
  * A missing or rejected credential disables derivation with a warning rather
  * than aborting the run: extraction does not depend on the model.
+ *
+ * Exported so the regeneration CLI builds a provider through the same wiring
+ * rather than a second copy of it. `undefined` means "no usable model": the
+ * extraction hook runs without one, while that CLI reports an error because it
+ * has nothing else to do.
  */
-async function buildProviderFromEnv(log: DerivationHookLogger): Promise<LlmProvider | undefined> {
+export async function buildDerivationProviderFromEnv(
+  log: DerivationHookLogger,
+): Promise<LlmProvider | undefined> {
   const { env } = await import('../../config/env.js');
 
   if (env.LLM_PROVIDER === 'fake') {

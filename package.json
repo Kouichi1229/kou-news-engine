@@ -30,7 +30,9 @@
     "notify": "node --env-file-if-exists=.env --import tsx src/cli/notify.ts",
     "notify:prod": "node dist/cli/notify.js",
     "notify:scheduled": "node --env-file-if-exists=.env --import tsx src/cli/notify-scheduled.ts",
-    "notify:scheduled:prod": "node dist/cli/notify-scheduled.js"
+    "notify:scheduled:prod": "node dist/cli/notify-scheduled.js",
+    "derive": "node --env-file-if-exists=.env --import tsx src/cli/derive.ts",
+    "derive:prod": "node dist/cli/derive.js"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
