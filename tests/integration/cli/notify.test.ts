@@ -500,6 +500,40 @@ describe('notify CLI — a send Telegram refused writes nothing', () => {
   });
 });
 
+describe('notify CLI — an article that fails validation', () => {
+  // A blank summary is unreachable here: `article_derived` has a CHECK on
+  // `length(summary_zh) > 0`, so the formatter unit tests cover that case.
+  it.each([
+    [
+      'a link that is not an http(s) URL',
+      'UPDATE articles SET url = ?, canonical_url = ?',
+      ['not-a-url', 'not-a-url'],
+    ],
+    ['a whitespace-only title', 'UPDATE article_derived SET title_zh = ?', ['   ']],
+  ])('is never sent and leaves no delivery record when it has %s', async (_label, sql, params) => {
+    const path = temporaryDatabasePath();
+    withDatabase(path, (database) => {
+      seed(database, [{ id: 'a1', order: 1 }]);
+      derive(database, 'a1', '2026-02-01T00:00:00.000Z');
+      database.query((connection) => connection.all(sql, params));
+    });
+    const { calls, transport } = fakeTransport();
+
+    const result = await run({ transport, openDatabase: () => openDatabase({ path }) });
+
+    // The provider refuses before any request, so nothing reaches Telegram and no
+    // success row can exist for an article that was never published.
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stdout).toEqual([]);
+    expect(JSON.parse(result.stderr[0] ?? '')).toMatchObject({
+      status: 'failed',
+      reason: 'missing_content',
+    });
+    expect(calls).toEqual([]);
+    expect(withDatabase(path, deliveries)).toEqual([]);
+  });
+});
+
 describe('notify CLI — nothing to publish', () => {
   it('exits 0 with no-article when no derivation exists', async () => {
     const database = openDatabase({ path: ':memory:' });

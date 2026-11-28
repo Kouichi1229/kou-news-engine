@@ -38,6 +38,15 @@ describe('formatTelegramMessage', () => {
     expect(message).not.toContain('a1');
   });
 
+  it.each(['http://example.com/story', 'https://example.com/story'])(
+    'accepts the %s form',
+    (sourceUrl) => {
+      expect(formatTelegramMessage(article({ sourceUrl }))).toBe(
+        ['繁體中文標題', '這是一段繁體中文短摘要。', sourceUrl].join('\n\n'),
+      );
+    },
+  );
+
   it('trims surrounding whitespace instead of reshaping the text', () => {
     const message = formatTelegramMessage(
       article({ titleZh: '  標題  ', summaryZh: '\n摘要\n', sourceUrl: `  ${SOURCE_URL}  ` }),
@@ -58,6 +67,26 @@ describe('formatTelegramMessage', () => {
 
     it('without a summary', () => {
       expect(formatTelegramMessage(article({ summaryZh: '' }))).toBeNull();
+    });
+
+    it.each([
+      ['a whitespace-only title', { titleZh: ' \n\t ' }],
+      ['an empty title', { titleZh: '' }],
+      ['a whitespace-only summary', { summaryZh: '  \t\n ' }],
+      ['an empty summary', { summaryZh: '' }],
+    ])('with %s', (_label, overrides) => {
+      expect(formatTelegramMessage(article(overrides as Partial<TelegramArticleInput>))).toBeNull();
+    });
+
+    it.each([
+      ['no scheme', 'example.com/news/2026/02/story-42'],
+      ['a relative path', '/news/2026/02/story-42'],
+      ['a non-http scheme', 'ftp://example.com/story-42'],
+      ['a script scheme', 'javascript:alert(1)'],
+      ['a scheme with no host', 'https://'],
+      ['plain text', 'not a url at all'],
+    ])('with a link that has %s', (_label, sourceUrl) => {
+      expect(formatTelegramMessage(article({ sourceUrl }))).toBeNull();
     });
 
     it('whose title and link alone leave no room for a summary', () => {

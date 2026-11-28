@@ -24,6 +24,25 @@ export type TelegramArticleInput = ArticleDerivedDraft & {
   readonly sourceUrl: string | null;
 };
 
+/**
+ * Whether the stored link is something Telegram can send as a link.
+ *
+ * Uses the platform `URL` parser rather than a validation package: the question is
+ * exactly "does this parse, and is the scheme http or https", and a regex over
+ * URLs is a well-known way to be wrong. `ftp:`, `javascript:`, a bare
+ * `example.com/x` and a relative path are all rejected, and so is `https://` with
+ * no host.
+ */
+function isHttpUrl(value: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.hostname !== '';
+}
+
 function fitSummary(summary: string, budget: number): string {
   if (summary.length <= budget) {
     return summary;
@@ -54,6 +73,11 @@ function fitSummary(summary: string, budget: number): string {
  * sending, and `null` says so without an error: a caller skips the article and
  * moves on.
  *
+ * Validation happens here, before anything is sent: a blank title or summary, and
+ * a link that is not an http(s) URL, all yield `null`. The checks live in the one
+ * place every caller already goes through, so no path can skip them and reach the
+ * network with content that should never have been published.
+ *
  * The summary is the only part that yields to the length limit. The title and the
  * link are what make the message identifiable, so an article whose title and link
  * alone do not fit is skipped rather than sent without its summary.
@@ -63,7 +87,7 @@ export function formatTelegramMessage(article: TelegramArticleInput): string | n
   const summary = article.summaryZh.trim();
   const sourceUrl = (article.sourceUrl ?? '').trim();
 
-  if (title.length === 0 || summary.length === 0 || sourceUrl.length === 0) {
+  if (title.length === 0 || summary.length === 0 || !isHttpUrl(sourceUrl)) {
     return null;
   }
 
