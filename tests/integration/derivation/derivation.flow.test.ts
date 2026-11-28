@@ -291,6 +291,25 @@ describe('extraction → derivation → article_derived', () => {
     expect((await contents.findById('a1'))?.contentText).not.toBeNull();
   });
 
+  it('completes the job without calling the model when a record already exists', async () => {
+    insertArticle('a1');
+    // A previous attempt stored the record but never completed the row.
+    const earlier = new FakeProvider({
+      responses: [{ kind: 'success', text: modelReply(120, '既有標題') }],
+    });
+    await derivation(earlier).derive('a1', BODY);
+
+    const provider = new FakeProvider({
+      responses: [{ kind: 'success', text: modelReply(120, '不該用到') }],
+    });
+    const summary = await runExtraction(provider);
+
+    expect(summary.extracted).toBe(1);
+    expect(provider.receivedRequests).toEqual([]);
+    expect(derivedRows()).toMatchObject([{ article_id: 'a1', title_zh: '既有標題' }]);
+    expect((await contents.findById('a1'))?.status).toBe('extracted');
+  });
+
   it('succeeds on a retry after a failing derivation', async () => {
     insertArticle('a1');
     const provider = new FakeProvider({
@@ -301,11 +320,16 @@ describe('extraction → derivation → article_derived', () => {
     });
 
     const first = await runExtraction(provider);
+    // A failed derivation stores nothing, which is what lets the retry call the
+    // model again instead of being answered by the idempotency check.
+    expect(derivedRows()).toEqual([]);
+
     const second = await runExtraction(provider);
     const row = await contents.findById('a1');
 
     expect(first.failed).toBe(1);
     expect(second.extracted).toBe(1);
+    expect(provider.receivedRequests).toHaveLength(2);
     expect(row).toMatchObject({ status: 'extracted', attempts: 2, failureCode: null });
     expect(derivedRows()).toMatchObject([{ article_id: 'a1', title_zh: '重試成功標題' }]);
   });
@@ -428,28 +452,39 @@ describe('ArticleDerivationService — output contract', () => {
     expect(derivedRows().map((row) => (row['summary_zh'] as string).length)).toEqual([100, 150]);
   });
 
-  it('replaces an earlier record and keeps created_at', async () => {
+  it('derives once and answers from the table afterwards', async () => {
     insertArticle('a1');
     const provider = new FakeProvider({
-      responses: [
-        { kind: 'success', text: modelReply(110, '第一版標題') },
-        { kind: 'success', text: modelReply(110, '第二版標題') },
-      ],
+      responses: [{ kind: 'success', text: modelReply(120, '第一次標題') }],
     });
+    const service = derivation(provider);
 
-    const first = new ArticleDerivationService({
-      provider,
-      repository: derived,
-      now: () => Date.parse('2026-02-01T00:00:00Z'),
-    });
-    await first.derive('a1', BODY);
+    const first = await service.derive('a1', BODY);
+    const second = await service.derive('a1', BODY);
 
-    const second = new ArticleDerivationService({
-      provider,
-      repository: derived,
-      now: () => Date.parse('2026-03-01T00:00:00Z'),
+    expect(provider.receivedRequests).toHaveLength(1);
+    expect(second).toEqual(first);
+    expect(second.titleZh).toBe('第一次標題');
+    expect(derivedRows()).toHaveLength(1);
+  });
+
+  it('replaces an earlier record and keeps created_at', async () => {
+    insertArticle('a1');
+
+    // The upsert is the repository's own contract. Through the service a second
+    // write is now unreachable, so this asserts the storage layer directly.
+    await derived.save({
+      articleId: 'a1',
+      titleZh: '第一版標題',
+      summaryZh: summaryOf(110),
+      at: '2026-02-01T00:00:00.000Z',
     });
-    await second.derive('a1', BODY);
+    await derived.save({
+      articleId: 'a1',
+      titleZh: '第二版標題',
+      summaryZh: summaryOf(110),
+      at: '2026-03-01T00:00:00.000Z',
+    });
 
     expect(derivedRows()).toEqual([
       {
@@ -458,6 +493,39 @@ describe('ArticleDerivationService — output contract', () => {
         summary_zh: summaryOf(110),
         created_at: '2026-02-01T00:00:00.000Z',
         updated_at: '2026-03-01T00:00:00.000Z',
+      },
+    ]);
+  });
+
+  it('leaves the stored record untouched when derived again', async () => {
+    insertArticle('a1');
+    const provider = new FakeProvider({
+      responses: [
+        { kind: 'success', text: modelReply(110, '第一版標題') },
+        { kind: 'success', text: modelReply(110, '第二版標題') },
+      ],
+    });
+
+    await new ArticleDerivationService({
+      provider,
+      repository: derived,
+      now: () => Date.parse('2026-02-01T00:00:00Z'),
+    }).derive('a1', BODY);
+
+    await new ArticleDerivationService({
+      provider,
+      repository: derived,
+      now: () => Date.parse('2026-03-01T00:00:00Z'),
+    }).derive('a1', BODY);
+
+    expect(provider.receivedRequests).toHaveLength(1);
+    expect(derivedRows()).toEqual([
+      {
+        article_id: 'a1',
+        title_zh: '第一版標題',
+        summary_zh: summaryOf(110),
+        created_at: '2026-02-01T00:00:00.000Z',
+        updated_at: '2026-02-01T00:00:00.000Z',
       },
     ]);
   });
@@ -471,6 +539,37 @@ describe('ArticleDerivationService — output contract', () => {
       reason: 'article-missing',
     });
     expect(provider.receivedRequests).toEqual([]);
+  });
+});
+
+describe('SqliteArticleDerivedRepository — findByArticleId', () => {
+  it('reports nothing for an article without a record', async () => {
+    insertArticle('a1');
+
+    expect(await derived.findByArticleId('a1')).toBeUndefined();
+  });
+
+  it('maps the stored record, including the last update time', async () => {
+    insertArticle('a1');
+    await derived.save({
+      articleId: 'a1',
+      titleZh: '第一版標題',
+      summaryZh: summaryOf(110),
+      at: '2026-02-01T00:00:00.000Z',
+    });
+    await derived.save({
+      articleId: 'a1',
+      titleZh: '第二版標題',
+      summaryZh: summaryOf(120),
+      at: '2026-03-01T00:00:00.000Z',
+    });
+
+    expect(await derived.findByArticleId('a1')).toEqual({
+      articleId: 'a1',
+      titleZh: '第二版標題',
+      summaryZh: summaryOf(120),
+      at: '2026-03-01T00:00:00.000Z',
+    });
   });
 });
 

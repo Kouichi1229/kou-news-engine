@@ -141,9 +141,13 @@ export interface ArticleDerivationDeps {
 /**
  * Produces the Traditional Chinese title and summary for one extracted article.
  *
- * One provider call, no retry, no queue and no status: the caller decides what a
- * thrown error means. The extraction process treats it as a warning, because the
- * extracted body is already committed and must not be lost to a model failure.
+ * One provider call at most, no retry, no queue and no status: the caller decides
+ * what a thrown error means, and extraction records it against the attempt.
+ *
+ * Deriving twice is a no-op: a stored record is the finished work, so the second
+ * call answers from the table and leaves the model alone. That is what makes a
+ * retried job cheap when the first attempt succeeded everywhere except in this
+ * process's bookkeeping.
  */
 export class ArticleDerivationService {
   private readonly deps: ArticleDerivationDeps;
@@ -153,6 +157,14 @@ export class ArticleDerivationService {
   }
 
   async derive(articleId: string, text: string): Promise<ArticleDerivedDraft> {
+    // Checked before the title lookup and before the model call: an existing
+    // record is the whole answer, and the article row it came from may already be
+    // gone by the time this runs again.
+    const existing = await this.deps.repository.findByArticleId(articleId);
+    if (existing !== undefined) {
+      return existing;
+    }
+
     const title = await this.deps.repository.findArticleTitle(articleId);
     if (title === undefined) {
       throw new DerivationError('article-missing', `No article row for ${articleId}`);

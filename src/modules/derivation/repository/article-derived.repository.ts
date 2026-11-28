@@ -19,6 +19,16 @@ export interface ArticleDerivedRepository {
   findArticleTitle(articleId: string): Promise<string | undefined>;
 
   /**
+   * The stored record for one article, or `undefined` when there is none.
+   *
+   * Presence is the whole validity question this boundary asks: the table's own
+   * CHECK constraints refuse an empty title or summary, and this service is the
+   * only writer, so a row that exists is a row that satisfied the contract. A
+   * caller that finds one has nothing left to do.
+   */
+  findByArticleId(articleId: string): Promise<ArticleDerivedDraft | undefined>;
+
+  /**
    * Stores the derived record, replacing an earlier one for the same article.
    *
    * Replacement rather than failure keeps `updated_at` meaningful while
